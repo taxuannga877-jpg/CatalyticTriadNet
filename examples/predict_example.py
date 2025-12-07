@@ -1,77 +1,28 @@
 #!/usr/bin/env python3
 """
-Example: Catalytic Site Prediction
-==================================
-
-This example demonstrates how to use CatalyticTriadNet to predict
-catalytic sites from a protein structure.
+预测示例 - 使用重构后的模块
 """
-
-import sys
-sys.path.insert(0, '../src')
 
 from catalytic_triad_net import EnhancedCatalyticSiteInference
 
+# 初始化预测器
+predictor = EnhancedCatalyticSiteInference(
+    model_path='models/best_model.pt',
+    device='cuda'  # 或 'cpu'
+)
 
-def main():
-    # Initialize predictor
-    # Note: For production use, provide a trained model path
-    predictor = EnhancedCatalyticSiteInference(
-        model_path=None,  # Uses random initialization for demo
-        device='cpu'
-    )
+# 预测 (支持PDB ID或本地文件)
+results = predictor.predict(
+    pdb_path='1acb',  # 丝氨酸蛋白酶
+    site_threshold=0.5
+)
 
-    # Example 1: Predict from PDB ID (will download automatically)
-    print("=" * 60)
-    print("Example 1: Predict catalytic sites for Trypsin (1ACB)")
-    print("=" * 60)
+# 打印结果
+predictor.print_results(results, top_k=15)
 
-    results = predictor.predict(
-        pdb_path='1acb',  # PDB ID - will be downloaded
-        site_threshold=0.3,
-        role_threshold=0.2
-    )
+# 导出格式
+predictor.export_pymol(results, 'output/1acb.pml')
+predictor.export_for_proteinmpnn(results, 'output/1acb_mpnn.json')
+predictor.export_for_rfdiffusion(results, 'output/1acb_rfd.json')
 
-    # Print results
-    predictor.print_results(results, top_k=10)
-
-    # Access specific results
-    print(f"\nSummary:")
-    print(f"  - PDB ID: {results['pdb_id']}")
-    print(f"  - EC Prediction: EC{results['ec1_prediction']}")
-    print(f"  - Confidence: {results['ec1_confidence']:.2%}")
-    print(f"  - Catalytic Residues: {len(results['catalytic_residues'])}")
-    print(f"  - Triads Found: {len(results['triads'])}")
-    print(f"  - Metal Centers: {len(results['metal_centers'])}")
-
-    # Example 2: Export for downstream tools
-    print("\n" + "=" * 60)
-    print("Example 2: Export for downstream design tools")
-    print("=" * 60)
-
-    # Export for nanozyme design
-    predictor.export_nanozyme_design_input(
-        results,
-        'output_nanozyme_template.json'
-    )
-    print("  - Exported: output_nanozyme_template.json")
-
-    # Export for ProteinMPNN
-    predictor.export_for_proteinmpnn(
-        results,
-        'output_proteinmpnn.json'
-    )
-    print("  - Exported: output_proteinmpnn.json")
-
-    # Export for RFdiffusion
-    predictor.export_for_rfdiffusion(
-        results,
-        'output_rfdiffusion.json'
-    )
-    print("  - Exported: output_rfdiffusion.json")
-
-    print("\nDone!")
-
-
-if __name__ == "__main__":
-    main()
+print("\n✓ 预测完成!")

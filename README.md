@@ -196,28 +196,39 @@ Rank  Chain  Residue      Prob     Role
 
 ## Modules
 
-### 1. Catalytic Site Prediction (`catalytic-triad-v2.py`)
+### 1. Core Module (`core/`)
 
-Core prediction model with:
-- Geometric GNN for structure encoding
-- Hierarchical EC classification
-- EC-conditioned site prediction
-- Catalytic role assignment
+Shared foundational components:
+- **data.py**: M-CSA database API integration
+- **structure.py**: PDB parsing and feature encoding
+- **dataset.py**: PyTorch dataset implementations
 
-### 2. Nanozyme Structure Generation (`nanozyme-diffusion-generator.py`)
+### 2. Prediction Module (`prediction/`)
 
-E(3)-equivariant diffusion model for generating nanozyme structures:
-- Catalytic constraint conditioning
-- Distance/angle constraint optimization
-- Support for metal coordination environments
+Catalytic site prediction system:
+- **models.py**: Geometric GNN architectures
+- **trainer.py**: Training loops and loss functions
+- **analysis.py**: Triad detection, metal center analysis, H-bond networks
+- **features.py**: Electronic, substrate-aware, and conservation features
+- **predictor.py**: High-level inference interface
 
-### 3. Visualization (`nanozyme-viz-complete.py`)
+### 3. Generation Module (`generation/`)
+
+E(3)-equivariant diffusion for nanozyme design:
+- **constraints.py**: Geometric constraint definitions
+- **models.py**: Diffusion models with constraint conditioning
+- **generator.py**: Nanozyme structure generator
+- **dataset.py**: Training data handling
+- **trainer.py**: Diffusion model training
+
+### 4. Visualization Module (`visualization/`)
 
 Comprehensive visualization toolkit:
-- 2D molecular graphs and triad diagrams
-- 3D active site visualization
-- Interactive Plotly plots
-- Export to PyMOL, ChimeraX, VMD
+- **adapters.py**: Support for RFdiffusion, ProteinMPNN, PyG formats
+- **exporters.py**: Export to PyMOL, ChimeraX, VMD
+- **plot_2d.py**: 2D molecular graphs and triad diagrams
+- **plot_3d.py**: 3D active site visualization with Plotly
+- **visualizer.py**: Unified visualization interface
 
 ---
 
@@ -289,13 +300,38 @@ CatalyticTriadNet/
 ├── setup.py                     # Package installation
 ├── src/
 │   └── catalytic_triad_net/
-│       ├── __init__.py
-│       ├── predictor.py         # Main prediction module
-│       ├── diffusion.py         # Diffusion model for generation
-│       └── visualization.py     # Visualization tools
+│       ├── __init__.py          # Package exports
+│       ├── cli.py               # Command-line interface
+│       │
+│       ├── core/                # Shared core modules
+│       │   ├── data.py          # M-CSA API data fetching
+│       │   ├── structure.py     # PDB processing & feature encoding
+│       │   └── dataset.py       # PyTorch datasets
+│       │
+│       ├── prediction/          # Catalytic site prediction
+│       │   ├── models.py        # GNN neural network models
+│       │   ├── trainer.py       # Training & loss functions
+│       │   ├── analysis.py      # Triad/metal/H-bond analysis
+│       │   ├── features.py      # Electronic/substrate/conservation features
+│       │   └── predictor.py     # Inference interface
+│       │
+│       ├── generation/          # Nanozyme structure generation
+│       │   ├── constraints.py   # Geometric constraint definitions
+│       │   ├── models.py        # E(3)-equivariant diffusion models
+│       │   ├── generator.py     # Nanozyme generator interface
+│       │   ├── dataset.py       # Diffusion datasets
+│       │   └── trainer.py       # Diffusion training
+│       │
+│       └── visualization/       # Visualization toolkit
+│           ├── adapters.py      # Diffusion model adapters
+│           ├── exporters.py     # PyMOL/ChimeraX/VMD export
+│           ├── plot_2d.py       # 2D molecular graphs
+│           ├── plot_3d.py       # 3D active site visualization
+│           └── visualizer.py    # Main visualizer interface
+│
 ├── examples/
 │   ├── predict_example.py       # Prediction example
-│   ├── generate_example.py      # Generation example
+│   ├── train_example.py         # Training example
 │   └── visualize_example.py     # Visualization example
 ├── docs/
 │   ├── images/
