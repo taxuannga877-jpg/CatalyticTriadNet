@@ -57,19 +57,39 @@ from .prediction.predictor import (
 )
 
 # 生成模块
-from .generation.diffusion import (
-    CatalyticNanozymeGenerator,
-    CatalyticDiffusionModel,
+from .generation.constraints import (
     CatalyticConstraints,
     GeometricConstraint
 )
 
+from .generation.models import (
+    CatalyticDiffusionModel,
+    E3EquivariantLayer,
+    EquivariantGNN
+)
+
+from .generation.generator import (
+    CatalyticNanozymeGenerator
+)
+
 # 可视化模块
-from .visualization.visualization import (
-    NanozymeVisualizer,
-    Visualizer2D,
-    Visualizer3D,
-    DiffusionModelAdapter,
+from .visualization.visualizer import (
+    NanozymeVisualizer
+)
+
+from .visualization.plot_2d import (
+    Visualizer2D
+)
+
+from .visualization.plot_3d import (
+    Visualizer3D
+)
+
+from .visualization.adapters import (
+    DiffusionModelAdapter
+)
+
+from .visualization.exporters import (
     ProfessionalExporter
 )
 

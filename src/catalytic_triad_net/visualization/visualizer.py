@@ -6,6 +6,7 @@
 from pathlib import Path
 from typing import Dict, List, Optional
 import logging
+import numpy as np
 
 from .adapters import DiffusionModelAdapter
 from .exporters import ProfessionalExporter
@@ -13,6 +14,13 @@ from .plot_2d import Visualizer2D
 from .plot_3d import Visualizer3D
 
 logger = logging.getLogger(__name__)
+
+# 检查Plotly是否可用
+try:
+    import plotly.graph_objects as go
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
 
 class NanozymeVisualizer:
     """

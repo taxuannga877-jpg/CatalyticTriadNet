@@ -4,9 +4,15 @@
 """
 import torch
 from torch.utils.data import Dataset
-from typing import Dict, List
+from typing import Dict, List, Optional
 import numpy as np
-from .constraints import CatalyticConstraints
+import json
+import logging
+from pathlib import Path
+
+from .constraints import CatalyticConstraints, ATOM_TO_IDX
+
+logger = logging.getLogger(__name__)
 class NanozymeDataset(Dataset):
     """纳米酶/催化分子数据集"""
     def __init__(self, data_dir: str, max_atoms: int = 100):

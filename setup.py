@@ -65,7 +65,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "catalytic-triad-net=catalytic_triad_net.predictor:main",
+            "catalytic-triad-net=catalytic_triad_net.cli:main",
         ],
     },
     include_package_data=True,

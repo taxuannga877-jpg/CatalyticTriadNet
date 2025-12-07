@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""扩散模型神经网络模块"""
-import math
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, Tuple, Optional
-
-#!/usr/bin/env python3
 """
 扩散模型神经网络模块
 包含: E(3)等变层、GNN、扩散模型、去噪器等
@@ -18,9 +10,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple, Optional
 
-# 从diffusion.py提取模型相关类
-# 包括: E3EquivariantLayer, EquivariantGNN, CatalyticDiffusionModel,
-#       SinusoidalPositionEmbeddings, ConditionEncoder, EquivariantDenoiser, ConstraintLoss
+# 导入常量和约束类
+from .constraints import (
+    NUM_ATOM_TYPES,
+    ATOM_TO_IDX,
+    ATOM_TYPES,
+    CatalyticConstraints,
+    GeometricConstraint
+)
 class E3EquivariantLayer(nn.Module):
     """
     E(3)-等变消息传递层

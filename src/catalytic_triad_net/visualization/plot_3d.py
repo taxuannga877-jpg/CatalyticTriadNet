@@ -20,6 +20,36 @@ try:
 except ImportError:
     PLOTLY_AVAILABLE = False
 
+# 颜色定义
+ROLE_COLORS = {
+    'nucleophile': '#FF6B6B',
+    'general_base': '#4ECDC4',
+    'general_acid': '#FFE66D',
+    'metal_ligand': '#95E1D3',
+    'transition_state_stabilizer': '#F38181',
+    'proton_donor': '#AA96DA',
+    'proton_acceptor': '#FCBAD3',
+    'electrostatic_stabilizer': '#A8E6CF',
+    'other': '#CCCCCC'
+}
+
+AA_COLORS = {
+    'ALA': '#C8C8C8', 'ARG': '#145AFF', 'ASN': '#00DCDC', 'ASP': '#E60A0A',
+    'CYS': '#E6E600', 'GLN': '#00DCDC', 'GLU': '#E60A0A', 'GLY': '#EBEBEB',
+    'HIS': '#8282D2', 'ILE': '#0F820F', 'LEU': '#0F820F', 'LYS': '#145AFF',
+    'MET': '#E6E600', 'PHE': '#3232AA', 'PRO': '#DC9682', 'SER': '#FA9600',
+    'THR': '#FA9600', 'TRP': '#B45AB4', 'TYR': '#3232AA', 'VAL': '#0F820F',
+    'UNK': '#CCCCCC'
+}
+
+METAL_COLORS = {
+    'FE': '#E06633', 'CU': '#C88033', 'ZN': '#7D80B0', 'MG': '#8AFF00',
+    'CA': '#3DFF00', 'MN': '#9C7AC7', 'CO': '#F090A0', 'NI': '#50D050',
+    'MO': '#54B5B5', 'W': '#2194D6', 'V': '#A6A6AB', 'CE': '#FFFFC7',
+    'PT': '#D0D0E0', 'PD': '#006985', 'AU': '#FFD123', 'AG': '#C0C0C0',
+    'DEFAULT': '#FF1493'
+}
+
 # 配位几何模板
 COORD_GEOMETRIES = {
     'tetrahedral': {

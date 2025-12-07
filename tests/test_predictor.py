@@ -15,7 +15,7 @@ class TestFeatureEncoder:
 
     def test_electronic_features(self):
         """Test electronic feature computation."""
-        from catalytic_triad_net.predictor import ElectronicFeatureEncoder
+        from catalytic_triad_net.prediction.features import ElectronicFeatureEncoder
 
         encoder = ElectronicFeatureEncoder()
         residue = {'name': 'HIS'}
@@ -27,7 +27,7 @@ class TestFeatureEncoder:
 
     def test_substrate_features(self):
         """Test substrate-aware feature computation."""
-        from catalytic_triad_net.predictor import SubstrateAwareEncoder
+        from catalytic_triad_net.prediction.features import SubstrateAwareEncoder
 
         encoder = SubstrateAwareEncoder()
         coords = np.random.randn(10, 3) * 10
@@ -45,7 +45,7 @@ class TestTriadDetector:
 
     def test_pattern_matching(self):
         """Test triad pattern matching."""
-        from catalytic_triad_net.predictor import TriadDetector
+        from catalytic_triad_net.prediction.analysis import TriadDetector
 
         detector = TriadDetector()
 
@@ -77,7 +77,7 @@ class TestBimetallicDetector:
 
     def test_bimetallic_detection(self):
         """Test detection of bimetallic centers."""
-        from catalytic_triad_net.predictor import BimetallicCenterDetector
+        from catalytic_triad_net.prediction.analysis import BimetallicCenterDetector
 
         detector = BimetallicCenterDetector()
 
@@ -103,7 +103,7 @@ class TestPDBProcessor:
 
     def test_pdb_download(self):
         """Test PDB download (requires network)."""
-        from catalytic_triad_net.predictor import PDBProcessor
+        from catalytic_triad_net.core.structure import PDBProcessor
 
         processor = PDBProcessor(pdb_dir='./test_pdb')
 
@@ -118,7 +118,7 @@ class TestModel:
     def test_geometric_gnn(self):
         """Test GeometricGNN forward pass."""
         import torch
-        from catalytic_triad_net.predictor import GeometricGNN
+        from catalytic_triad_net.prediction.models import GeometricGNN
 
         model = GeometricGNN(
             node_dim=48,
@@ -140,25 +140,13 @@ class TestModel:
     def test_full_model(self):
         """Test full model forward pass."""
         import torch
-        from catalytic_triad_net.predictor import CatalyticTriadPredictorV2
+        from catalytic_triad_net.prediction.models import CatalyticTriadPredictor
 
-        config = {
-            'model': {
-                'node_dim': 48,
-                'edge_dim': 14,
-                'hidden_dim': 64,
-                'num_gnn_layers': 2,
-                'num_heads': 4,
-                'dropout': 0.1,
-            },
-            'ec_prediction': {
-                'num_ec1_classes': 7,
-                'num_ec2_classes': 70,
-                'num_ec3_classes': 300,
-            }
-        }
-
-        model = CatalyticTriadPredictorV2(config)
+        model = CatalyticTriadPredictor(
+            hidden_dim=64,
+            num_gnn_layers=2,
+            dropout=0.1
+        )
 
         x = torch.randn(10, 48)
         edge_index = torch.randint(0, 10, (2, 30))
