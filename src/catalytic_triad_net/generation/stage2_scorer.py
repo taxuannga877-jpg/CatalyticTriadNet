@@ -2,16 +2,27 @@
 """
 阶段2：纳米酶活性精确打分器
 对已组装的纳米酶结构进行NAC几何打分和活性预测
+
+v2.1 更新：集成autodE自动过渡态计算
 """
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 import logging
+import tempfile
+import os
 
 from .substrate_definitions import (
     SUBSTRATE_LIBRARY,
     validate_substrate
 )
+
+# 尝试导入autodE模块
+try:
+    from .autode_ts_calculator import AutodETSCalculator, SubstrateReactionLibrary
+    AUTODE_AVAILABLE = True
+except ImportError:
+    AUTODE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -21,23 +32,41 @@ class Stage2NanozymeActivityScorer:
     阶段2精确打分器
 
     目的：对已组装的纳米酶结构进行精确的活性评估
-    方法：NAC几何打分 + 底物对接（简化版）
-    速度：每个纳米酶 1-10秒
+    方法：NAC几何打分 + 底物对接（简化版） + autodE TS计算（可选）
+    速度：每个纳米酶 1-10秒（几何打分）或 1-10分钟（TS计算）
 
     使用示例:
+        # 基础模式（仅几何打分）
         scorer = Stage2NanozymeActivityScorer(substrate='TMB')
+        result = scorer.score_nanozyme(nanozyme_structure)
 
-        # 评估单个纳米酶
+        # 高精度模式（包含TS计算）
+        scorer = Stage2NanozymeActivityScorer(
+            substrate='TMB',
+            use_ts_calculation=True,
+            ts_method='xtb'
+        )
         result = scorer.score_nanozyme(nanozyme_structure)
 
         # 批量评估
         ranked = scorer.rank_nanozymes(nanozyme_list)
     """
 
-    def __init__(self, substrate: str = 'TMB'):
+    def __init__(
+        self,
+        substrate: str = 'TMB',
+        use_ts_calculation: bool = False,
+        ts_method: str = 'xtb',
+        ts_quick_mode: bool = False,
+        n_cores: int = 4
+    ):
         """
         Args:
             substrate: 目标底物
+            use_ts_calculation: 是否使用autodE计算过渡态
+            ts_method: TS计算方法 ('xtb', 'orca')
+            ts_quick_mode: 快速模式（仅估算活化能）
+            n_cores: CPU核心数
         """
         if not validate_substrate(substrate):
             raise ValueError(f"不支持的底物: {substrate}")
@@ -46,7 +75,28 @@ class Stage2NanozymeActivityScorer:
         self.substrate_def = SUBSTRATE_LIBRARY[substrate]
         self.nac_conditions = self.substrate_def.nac_conditions
 
-        logger.info(f"阶段2打分器初始化: 底物={substrate}")
+        # autodE配置
+        self.use_ts_calculation = use_ts_calculation
+        self.ts_quick_mode = ts_quick_mode
+        self.ts_calculator = None
+
+        if use_ts_calculation:
+            if not AUTODE_AVAILABLE:
+                logger.warning("autodE未安装，TS计算已禁用")
+                logger.warning("安装方法: pip install autode && conda install -c conda-forge xtb")
+                self.use_ts_calculation = False
+            else:
+                try:
+                    self.ts_calculator = AutodETSCalculator(
+                        method=ts_method,
+                        n_cores=n_cores
+                    )
+                    logger.info(f"✓ autodE TS计算器已启用 (method={ts_method}, quick_mode={ts_quick_mode})")
+                except Exception as e:
+                    logger.error(f"autodE初始化失败: {e}")
+                    self.use_ts_calculation = False
+
+        logger.info(f"阶段2打分器初始化: 底物={substrate}, TS计算={'启用' if self.use_ts_calculation else '禁用'}")
 
     def score_nanozyme(self, nanozyme: Dict) -> Dict:
         """
@@ -56,7 +106,7 @@ class Stage2NanozymeActivityScorer:
             nanozyme: 纳米酶结构字典（来自ScaffoldBuilder）
 
         Returns:
-            评分结果
+            评分结果（包含TS计算结果，如果启用）
         """
         # 提取坐标和元素
         coords = np.array(nanozyme['coords'])
@@ -65,40 +115,76 @@ class Stage2NanozymeActivityScorer:
 
         scores = {}
 
-        # 1. NAC几何打分 (60%)
+        # 1. NAC几何打分 (60% 或 40% 如果有TS)
         nac_score = self._calculate_nac_score(coords, elements, fg_indices)
         scores['nac_geometry'] = nac_score
 
-        # 2. 催化中心可及性 (20%)
+        # 2. 催化中心可及性 (20% 或 15% 如果有TS)
         accessibility_score = self._calculate_accessibility(coords, fg_indices)
         scores['accessibility'] = accessibility_score
 
-        # 3. 功能团协同性 (10%)
+        # 3. 功能团协同性 (10% 或 8% 如果有TS)
         synergy_score = self._calculate_synergy(coords, fg_indices)
         scores['synergy'] = synergy_score
 
-        # 4. 结构稳定性 (10%)
+        # 4. 结构稳定性 (10% 或 7% 如果有TS)
         stability_score = self._calculate_stability(coords, elements)
         scores['stability'] = stability_score
 
-        # 总分
-        total_score = (
-            nac_score * 0.6 +
-            accessibility_score * 0.2 +
-            synergy_score * 0.1 +
-            stability_score * 0.1
-        )
+        # 5. autodE TS计算 (30% 如果启用)
+        ts_result = None
+        ts_score = 0.0
+
+        if self.use_ts_calculation and self.ts_calculator is not None:
+            ts_result = self._calculate_ts_score(nanozyme)
+            if ts_result and ts_result.get('success', False):
+                ts_score = ts_result['ts_score']
+                scores['ts_calculation'] = ts_score
+                logger.info(f"✓ TS计算完成: Ea={ts_result.get('activation_energy', 'N/A')} kcal/mol")
+            else:
+                logger.warning("TS计算失败，使用几何打分")
+
+        # 计算总分（根据是否有TS调整权重）
+        if self.use_ts_calculation and ts_result and ts_result.get('success', False):
+            # 有TS计算：几何40% + 可及15% + 协同8% + 稳定7% + TS 30%
+            total_score = (
+                nac_score * 0.40 +
+                accessibility_score * 0.15 +
+                synergy_score * 0.08 +
+                stability_score * 0.07 +
+                ts_score * 0.30
+            )
+        else:
+            # 无TS计算：几何60% + 可及20% + 协同10% + 稳定10%
+            total_score = (
+                nac_score * 0.6 +
+                accessibility_score * 0.2 +
+                synergy_score * 0.1 +
+                stability_score * 0.1
+            )
 
         # 活性预测
-        activity_prediction = self._predict_activity(total_score)
+        activity_prediction = self._predict_activity(total_score, ts_result)
 
-        return {
+        result = {
             'total_score': total_score,
             'component_scores': scores,
             'activity_prediction': activity_prediction,
             'substrate': self.substrate,
-            'nanozyme_id': nanozyme.get('assembly_info', {}).get('source_pdbs', 'unknown')
+            'nanozyme_id': nanozyme.get('assembly_info', {}).get('source_pdbs', 'unknown'),
+            'ts_enabled': self.use_ts_calculation
         }
+
+        # 添加TS详细结果
+        if ts_result and ts_result.get('success', False):
+            result['ts_details'] = {
+                'activation_energy': ts_result.get('activation_energy'),
+                'reaction_energy': ts_result.get('reaction_energy'),
+                'ts_frequency': ts_result.get('ts_frequency'),
+                'method': ts_result.get('method', 'unknown')
+            }
+
+        return result
 
     def _calculate_nac_score(self, coords: np.ndarray,
                             elements: List[str],
@@ -445,41 +531,171 @@ class Stage2NanozymeActivityScorer:
 
         return stability_score
 
-    def _predict_activity(self, total_score: float) -> Dict:
+    def _calculate_ts_score(self, nanozyme: Dict) -> Dict:
         """
-        根据总分预测活性等级
+        使用autodE计算过渡态并转换为评分
+
+        Args:
+            nanozyme: 纳米酶结构
+
+        Returns:
+            {
+                'ts_score': 0.0-1.0,
+                'activation_energy': float (kcal/mol),
+                'reaction_energy': float (kcal/mol),
+                'ts_frequency': float (cm^-1),
+                'method': str,
+                'success': bool
+            }
+        """
+        # 保存纳米酶结构为临时XYZ文件
+        temp_xyz = tempfile.NamedTemporaryFile(mode='w', suffix='.xyz', delete=False)
+
+        try:
+            # 写入XYZ格式
+            coords = nanozyme['coords']
+            elements = nanozyme['elements']
+
+            temp_xyz.write(f"{len(coords)}\n")
+            temp_xyz.write(f"Nanozyme structure\n")
+            for elem, coord in zip(elements, coords):
+                temp_xyz.write(f"{elem:2s} {coord[0]:12.6f} {coord[1]:12.6f} {coord[2]:12.6f}\n")
+            temp_xyz.close()
+
+            # 获取底物SMILES
+            reaction_params = SubstrateReactionLibrary.get_reaction_params(self.substrate)
+            if reaction_params is None:
+                logger.error(f"未找到底物 {self.substrate} 的反应参数")
+                return {'success': False, 'error': 'Unknown substrate'}
+
+            substrate_smiles = reaction_params['substrate_smiles']
+
+            # 执行TS计算
+            if self.ts_quick_mode:
+                # 快速模式：仅估算活化能
+                ea = self.ts_calculator.quick_estimate_barrier(
+                    temp_xyz.name,
+                    substrate_smiles,
+                    use_ml=True
+                )
+
+                result = {
+                    'activation_energy': ea,
+                    'reaction_energy': None,
+                    'ts_frequency': None,
+                    'method': 'quick_estimate',
+                    'success': True
+                }
+            else:
+                # 完整TS计算
+                result = self.ts_calculator.calculate_reaction_profile(
+                    temp_xyz.name,
+                    substrate_smiles,
+                    reaction_params.get('product_smiles'),
+                    reaction_params.get('charge', 0),
+                    reaction_params.get('mult', 1)
+                )
+
+            # 转换活化能为评分 (0-1)
+            if result.get('success', False):
+                ea = result['activation_energy']
+
+                # 评分规则：
+                # Ea < 10 kcal/mol  -> 1.0 (极好)
+                # Ea = 15 kcal/mol  -> 0.8 (好)
+                # Ea = 20 kcal/mol  -> 0.5 (中等)
+                # Ea = 25 kcal/mol  -> 0.2 (差)
+                # Ea > 30 kcal/mol  -> 0.0 (很差)
+
+                if ea < 10:
+                    ts_score = 1.0
+                elif ea < 30:
+                    ts_score = max(0, 1.0 - (ea - 10) / 20.0)
+                else:
+                    ts_score = 0.0
+
+                result['ts_score'] = ts_score
+
+                logger.info(f"TS计算成功: Ea={ea:.2f} kcal/mol, score={ts_score:.3f}")
+            else:
+                result['ts_score'] = 0.0
+                logger.warning(f"TS计算失败: {result.get('error', 'Unknown error')}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"TS计算异常: {e}")
+            return {'success': False, 'error': str(e), 'ts_score': 0.0}
+
+        finally:
+            # 清理临时文件
+            try:
+                os.unlink(temp_xyz.name)
+            except:
+                pass
+
+    def _predict_activity(self, total_score: float, ts_result: Optional[Dict] = None) -> Dict:
+        """
+        根据总分和TS结果预测活性等级
+
+        Args:
+            total_score: 总评分
+            ts_result: TS计算结果（可选）
 
         Returns:
             {
                 'level': 'high'/'medium'/'low'/'very_low',
                 'confidence': 0.85,
-                'description': '...'
+                'description': '...',
+                'ea_range': (min, max) kcal/mol (如果有TS)
             }
         """
+        # 基础预测
         if total_score >= 0.8:
-            return {
-                'level': 'high',
-                'confidence': 0.9,
-                'description': '预测具有高催化活性，强烈推荐实验验证'
-            }
+            level = 'high'
+            base_confidence = 0.9
+            description = '预测具有高催化活性，强烈推荐实验验证'
         elif total_score >= 0.6:
-            return {
-                'level': 'medium',
-                'confidence': 0.75,
-                'description': '预测具有中等催化活性，建议实验验证'
-            }
+            level = 'medium'
+            base_confidence = 0.75
+            description = '预测具有中等催化活性，建议实验验证'
         elif total_score >= 0.4:
-            return {
-                'level': 'low',
-                'confidence': 0.6,
-                'description': '预测催化活性较低，可能需要优化'
-            }
+            level = 'low'
+            base_confidence = 0.6
+            description = '预测催化活性较低，可能需要优化'
         else:
-            return {
-                'level': 'very_low',
-                'confidence': 0.5,
-                'description': '预测催化活性很低，不推荐'
-            }
+            level = 'very_low'
+            base_confidence = 0.5
+            description = '预测催化活性很低，不推荐'
+
+        result = {
+            'level': level,
+            'confidence': base_confidence,
+            'description': description
+        }
+
+        # 如果有TS计算结果，提升置信度并添加详细信息
+        if ts_result and ts_result.get('success', False):
+            ea = ts_result.get('activation_energy')
+
+            if ea is not None:
+                # 提升置信度
+                result['confidence'] = min(0.95, base_confidence + 0.15)
+
+                # 添加活化能信息
+                result['ea_range'] = (ea - 2, ea + 2)  # ±2 kcal/mol 误差范围
+
+                # 更新描述
+                if ea < 15:
+                    result['description'] += f" (计算活化能: {ea:.1f} kcal/mol，优秀)"
+                elif ea < 20:
+                    result['description'] += f" (计算活化能: {ea:.1f} kcal/mol，良好)"
+                elif ea < 25:
+                    result['description'] += f" (计算活化能: {ea:.1f} kcal/mol，中等)"
+                else:
+                    result['description'] += f" (计算活化能: {ea:.1f} kcal/mol，较高)"
+
+        return result
 
     def rank_nanozymes(self, nanozymes: List[Dict]) -> List[Tuple[Dict, Dict]]:
         """

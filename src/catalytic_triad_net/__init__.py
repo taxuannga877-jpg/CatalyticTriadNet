@@ -109,6 +109,17 @@ from .generation.stage2_scorer import (
     MultiSubstrateStage2Scorer
 )
 
+# autodE过渡态计算模块（可选）
+try:
+    from .generation.autode_ts_calculator import (
+        AutodETSCalculator,
+        SubstrateReactionLibrary,
+        batch_calculate_barriers
+    )
+    AUTODE_AVAILABLE = True
+except ImportError:
+    AUTODE_AVAILABLE = False
+
 # 可视化模块
 from .visualization.visualizer import (
     NanozymeVisualizer
@@ -196,3 +207,11 @@ __all__ = [
     "DiffusionModelAdapter",
     "ProfessionalExporter",
 ]
+
+# 如果autodE可用，添加到__all__
+if AUTODE_AVAILABLE:
+    __all__.extend([
+        "AutodETSCalculator",
+        "SubstrateReactionLibrary",
+        "batch_calculate_barriers",
+    ])
