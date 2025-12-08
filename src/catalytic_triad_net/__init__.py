@@ -13,6 +13,13 @@ from .core.data import (
     CatalyticResidue
 )
 
+# Swiss-Prot数据模块（570,000+条目）
+from .core.swissprot_data import (
+    SwissProtEntry,
+    SwissProtDataFetcher,
+    SwissProtDataParser
+)
+
 from .core.structure import (
     PDBProcessor,
     FeatureEncoder,
@@ -145,12 +152,19 @@ __all__ = [
     # 版本信息
     "__version__",
     "__author__",
-    
-    # 核心模块
+
+    # 核心模块 - M-CSA数据
     "MCSADataFetcher",
     "MCSADataParser",
     "EnzymeEntry",
     "CatalyticResidue",
+
+    # 核心模块 - Swiss-Prot数据（570,000+条目）
+    "SwissProtEntry",
+    "SwissProtDataFetcher",
+    "SwissProtDataParser",
+
+    # 核心模块 - 结构处理
     "PDBProcessor",
     "FeatureEncoder",
     "CatalyticSiteDataset",
