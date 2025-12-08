@@ -1,10 +1,6 @@
 # CatalyticTriadNet: 基于几何深度学习的酶催化位点识别与纳米酶设计框架
 
 <p align="center">
-  <img src="docs/banner.png" width="800"/>
-</p>
-
-<p align="center">
   <a href="#核心功能">核心功能</a> •
   <a href="#快速开始">快速开始</a> •
   <a href="#纳米酶设计">纳米酶设计</a> •
