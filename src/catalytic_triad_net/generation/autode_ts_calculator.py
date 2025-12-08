@@ -367,6 +367,163 @@ class AutodETSCalculator:
 
         return ea_estimate
 
+    def calculate_single_point_energy_xtb(
+        self,
+        xyz_file: str,
+        charge: int = 0,
+        mult: int = 1
+    ) -> Dict[str, Any]:
+        """
+        使用xTB直接计算单点能量
+
+        Args:
+            xyz_file: XYZ结构文件
+            charge: 总电荷
+            mult: 自旋多重度
+
+        Returns:
+            {
+                'energy': float (Hartree),
+                'energy_kcal': float (kcal/mol),
+                'success': bool
+            }
+        """
+        try:
+            mol = ade.Molecule(xyz_file, charge=charge, mult=mult)
+
+            # 使用xTB计算单点能量
+            mol.single_point(method=ade.methods.XTB())
+
+            energy_hartree = mol.energy
+            energy_kcal = energy_hartree * 627.509  # Hartree to kcal/mol
+
+            return {
+                'energy': energy_hartree,
+                'energy_kcal': energy_kcal,
+                'success': True
+            }
+        except Exception as e:
+            print(f"xTB单点能量计算失败: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def optimize_structure_xtb(
+        self,
+        xyz_file: str,
+        output_file: str,
+        charge: int = 0,
+        mult: int = 1
+    ) -> Dict[str, Any]:
+        """
+        使用xTB优化分子结构
+
+        Args:
+            xyz_file: 输入XYZ文件
+            output_file: 输出优化后的XYZ文件
+            charge: 总电荷
+            mult: 自旋多重度
+
+        Returns:
+            {
+                'optimized_energy': float (kcal/mol),
+                'optimized_structure': str (XYZ格式),
+                'success': bool
+            }
+        """
+        try:
+            mol = ade.Molecule(xyz_file, charge=charge, mult=mult)
+
+            # 使用xTB优化结构
+            print(f"⏳ 使用xTB优化结构...")
+            mol.optimise(method=ade.methods.XTB())
+
+            # 保存优化后的结构
+            with open(output_file, 'w') as f:
+                f.write(self._get_xyz_string(mol))
+
+            energy_kcal = mol.energy * 627.509
+
+            print(f"✓ 优化完成! 能量: {energy_kcal:.2f} kcal/mol")
+
+            return {
+                'optimized_energy': energy_kcal,
+                'optimized_structure': self._get_xyz_string(mol),
+                'output_file': output_file,
+                'success': True
+            }
+        except Exception as e:
+            print(f"xTB结构优化失败: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def calculate_reaction_barrier_xtb(
+        self,
+        reactant_xyz: str,
+        product_xyz: str,
+        charge: int = 0,
+        mult: int = 1
+    ) -> Dict[str, Any]:
+        """
+        使用xTB计算反应能垒（简化版）
+
+        通过优化反应物和产物，估算能垒
+
+        Args:
+            reactant_xyz: 反应物XYZ文件
+            product_xyz: 产物XYZ文件
+            charge: 总电荷
+            mult: 自旋多重度
+
+        Returns:
+            {
+                'reactant_energy': float (kcal/mol),
+                'product_energy': float (kcal/mol),
+                'reaction_energy': float (kcal/mol),
+                'estimated_barrier': float (kcal/mol),
+                'success': bool
+            }
+        """
+        try:
+            # 优化反应物
+            print("⏳ 优化反应物...")
+            reactant = ade.Molecule(reactant_xyz, charge=charge, mult=mult)
+            reactant.optimise(method=ade.methods.XTB())
+            e_reactant = reactant.energy * 627.509
+
+            # 优化产物
+            print("⏳ 优化产物...")
+            product = ade.Molecule(product_xyz, charge=charge, mult=mult)
+            product.optimise(method=ade.methods.XTB())
+            e_product = product.energy * 627.509
+
+            # 反应能
+            delta_e = e_product - e_reactant
+
+            # 估算能垒（使用Hammond假设）
+            # 对于放热反应：Ea ≈ 10-15 kcal/mol
+            # 对于吸热反应：Ea ≈ ΔE + 10-15 kcal/mol
+            if delta_e < 0:  # 放热
+                estimated_barrier = 12.0
+            else:  # 吸热
+                estimated_barrier = delta_e + 12.0
+
+            print(f"\n{'='*60}")
+            print(f"✓ xTB反应能垒计算完成")
+            print(f"  反应物能量: {e_reactant:.2f} kcal/mol")
+            print(f"  产物能量:   {e_product:.2f} kcal/mol")
+            print(f"  反应能 (ΔE): {delta_e:.2f} kcal/mol")
+            print(f"  估算能垒:   {estimated_barrier:.2f} kcal/mol")
+            print(f"{'='*60}\n")
+
+            return {
+                'reactant_energy': e_reactant,
+                'product_energy': e_product,
+                'reaction_energy': delta_e,
+                'estimated_barrier': estimated_barrier,
+                'success': True
+            }
+        except Exception as e:
+            print(f"xTB能垒计算失败: {e}")
+            return {'success': False, 'error': str(e)}
+
     def _ml_barrier_prediction(
         self,
         nanozyme_xyz: str,
