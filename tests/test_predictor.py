@@ -6,8 +6,11 @@ Unit tests for CatalyticTriadNet predictor module.
 import sys
 import pytest
 import numpy as np
+from pathlib import Path
 
-sys.path.insert(0, '../src')
+# 添加项目根目录的 src 到路径
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root / 'src'))
 
 
 class TestFeatureEncoder:

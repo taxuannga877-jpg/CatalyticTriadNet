@@ -16,6 +16,18 @@ try:
     AUTODE_AVAILABLE = True
 except ImportError:
     AUTODE_AVAILABLE = False
+    # 创建一个虚拟的 ade 模块以避免 NameError
+    class _DummyAde:
+        class Molecule: pass
+        class Reaction: pass
+        class Config:
+            n_cores = 1
+            max_core = 3600
+            lcode = 'xtb'
+            hcode = 'xtb'
+        class methods:
+            class XTB: pass
+    ade = _DummyAde()
     print("Warning: autodE not installed. TS calculation will be disabled.")
     print("Install with: pip install autode")
 
@@ -25,6 +37,8 @@ try:
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
+    Chem = None
+    AllChem = None
 
 
 class AutodETSCalculator:
@@ -210,7 +224,7 @@ class AutodETSCalculator:
         substrate_smiles: str,
         charge: int,
         mult: int
-    ) -> ade.Molecule:
+    ) -> Any:  # 使用 Any 替代 ade.Molecule 以避免导入错误
         """构建反应物复合物（纳米酶 + 底物）"""
         # 读取纳米酶结构
         nanozyme = ade.Molecule(nanozyme_xyz, charge=charge, mult=mult)

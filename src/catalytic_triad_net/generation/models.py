@@ -266,12 +266,12 @@ class CatalyticDiffusionModel(nn.Module):
         }
     
     @torch.no_grad()
-    def sample(self, condition: Dict[str, torch.Tensor], 
+    def sample(self, condition: Dict[str, torch.Tensor],
                n_atoms: int, n_samples: int = 1,
                guidance_scale: float = 1.0) -> Dict[str, torch.Tensor]:
         """
         条件采样生成分子
-        
+
         Args:
             condition: 催化约束条件
             n_atoms: 生成原子数
@@ -279,50 +279,51 @@ class CatalyticDiffusionModel(nn.Module):
             guidance_scale: 条件引导强度
         """
         device = next(self.parameters()).device
-        
+
         # 初始化噪声
         x = torch.randn(n_samples, n_atoms, 3, device=device)
         atom_types = torch.randint(0, self.num_atom_types, (n_samples, n_atoms), device=device)
-        
-        # 构建全连接图
-        edge_index = self._build_fc_edges(n_atoms, device)
-        
-        # 编码条件
-        cond_emb = self.condition_encoder(condition)
-        
+
+        # 构建批次全连接图（为每个样本创建独立的边索引）
+        edge_index = self._build_batch_fc_edges(n_atoms, n_samples, device)
+
+        # 编码条件并扩展到批次大小
+        cond_emb = self.condition_encoder(condition)  # [1, hidden]
+        cond_emb = cond_emb.expand(n_samples, -1)  # [n_samples, hidden]
+
         # 反向扩散采样
         for t in reversed(range(self.num_timesteps)):
             t_tensor = torch.full((n_samples,), t, device=device, dtype=torch.long)
             t_emb = self.time_embed(t_tensor)
-            
+
             # 预测噪声
             h = self.atom_embed(atom_types).view(n_samples * n_atoms, -1)
             h_out, _ = self.denoiser(
                 h, x.view(n_samples * n_atoms, 3),
                 edge_index, t_emb, cond_emb
             )
-            
+
             pred_noise = self.coord_head(h_out).view(n_samples, n_atoms, 3)
             pred_atom_logits = self.atom_type_head(h_out).view(n_samples, n_atoms, -1)
-            
+
             # DDPM采样步
             alpha = self.alphas[t]
             alpha_cumprod = self.alphas_cumprod[t]
             beta = self.betas[t]
-            
+
             if t > 0:
                 noise = torch.randn_like(x)
             else:
                 noise = torch.zeros_like(x)
-            
+
             x = (1 / torch.sqrt(alpha)) * (
                 x - (beta / torch.sqrt(1 - alpha_cumprod)) * pred_noise
             ) + torch.sqrt(beta) * noise
-            
+
             # 更新原子类型 (采样)
             if t % 100 == 0:
                 atom_types = pred_atom_logits.argmax(dim=-1)
-        
+
         return {
             'atom_types': atom_types,
             'coords': x,
@@ -337,6 +338,18 @@ class CatalyticDiffusionModel(nn.Module):
                 if i != j:
                     rows.append(i)
                     cols.append(j)
+        return torch.tensor([rows, cols], dtype=torch.long, device=device)
+
+    def _build_batch_fc_edges(self, n_atoms: int, n_samples: int, device) -> torch.Tensor:
+        """构建批次全连接边（为每个样本创建独立的边索引）"""
+        rows, cols = [], []
+        for sample_idx in range(n_samples):
+            offset = sample_idx * n_atoms
+            for i in range(n_atoms):
+                for j in range(n_atoms):
+                    if i != j:
+                        rows.append(offset + i)
+                        cols.append(offset + j)
         return torch.tensor([rows, cols], dtype=torch.long, device=device)
 
 
@@ -442,24 +455,27 @@ class EquivariantDenoiser(nn.Module):
             x: 节点坐标 [N, 3]
             edge_index: 边索引
             t_emb: 时间嵌入 [B, hidden]
-            cond_emb: 条件嵌入 [B, hidden] or [1, hidden]
+            cond_emb: 条件嵌入 [B, hidden]
         """
         # 注入时间和条件信息
         t_proj = self.time_proj(t_emb)  # [B, hidden]
         c_proj = self.cond_proj(cond_emb)  # [B, hidden]
-        
-        # 广播到所有节点
+
+        # 广播到所有节点（正确处理批次）
         N = h.shape[0]
         B = t_emb.shape[0]
         nodes_per_sample = N // B if B > 0 else N
-        
-        # 简化: 假设batch_size=1或均匀分布
-        h = h + t_proj.repeat(nodes_per_sample, 1) + c_proj.repeat(nodes_per_sample, 1)
-        
+
+        # 使用 repeat_interleave 正确广播到每个样本的节点
+        t_broadcast = t_proj.repeat_interleave(nodes_per_sample, dim=0)  # [N, hidden]
+        c_broadcast = c_proj.repeat_interleave(nodes_per_sample, dim=0)  # [N, hidden]
+
+        h = h + t_broadcast + c_broadcast
+
         # 等变层
         for layer in self.layers:
             h, x = layer(h, x, edge_index)
-        
+
         return self.norm(h), x
 
 
@@ -493,15 +509,13 @@ class ConstraintLoss(nn.Module):
                 actual_dist = torch.norm(coords[i] - coords[j])
                 target_dist = dc.target_value
                 tolerance = dc.tolerance
-                
-                # Huber-like损失
+
+                # Huber-like损失（使用张量操作避免布尔值错误）
                 diff = torch.abs(actual_dist - target_dist)
-                if diff > tolerance:
-                    loss = dc.weight * (diff - tolerance) ** 2
-                else:
-                    loss = 0.0
-                total_loss += loss
-        
+                # 使用 torch.where 或 torch.clamp 替代 if 语句
+                loss = dc.weight * torch.clamp(diff - tolerance, min=0.0) ** 2
+                total_loss = total_loss + loss
+
         return total_loss * self.distance_weight
 
 

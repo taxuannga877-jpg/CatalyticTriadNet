@@ -80,32 +80,46 @@ class Trainer:
         # 简化版: 假设同一batch内原子数相同或进行padding
         atom_types = torch.stack([b['atom_types'] for b in batch])
         coords = torch.stack([b['coords'] for b in batch])
-        
-        # 构建边
+
+        # 构建批次边索引（为每个样本创建独立的边）
+        batch_size = len(batch)
         n_atoms = atom_types.shape[1]
-        edge_index = self._build_edges(n_atoms, atom_types.device)
-        
-        # 空条件 (训练时无监督)
+        edge_index = self._build_batch_edges(n_atoms, batch_size, atom_types.device)
+
+        # 空条件 (训练时无监督) - 扩展到批次大小
         condition = {
-            'anchor_features': torch.zeros(1, 16),
-            'distance_constraints': torch.zeros(0, 4),
-            'coordination_constraints': torch.zeros(0, 3)
+            'anchor_features': torch.zeros(batch_size, 16, device=atom_types.device),
+            'distance_constraints': torch.zeros(0, 4, device=atom_types.device),
+            'coordination_constraints': torch.zeros(0, 3, device=atom_types.device)
         }
-        
+
         return {
             'atom_types': atom_types,
             'coords': coords,
             'edge_index': edge_index,
             'condition': condition
         }
-    
+
     def _build_edges(self, n, device):
+        """构建单个图的全连接边"""
         rows, cols = [], []
         for i in range(n):
             for j in range(n):
                 if i != j:
                     rows.append(i)
                     cols.append(j)
+        return torch.tensor([rows, cols], dtype=torch.long, device=device)
+
+    def _build_batch_edges(self, n_atoms, batch_size, device):
+        """构建批次全连接边（为每个样本创建独立的边索引）"""
+        rows, cols = [], []
+        for batch_idx in range(batch_size):
+            offset = batch_idx * n_atoms
+            for i in range(n_atoms):
+                for j in range(n_atoms):
+                    if i != j:
+                        rows.append(offset + i)
+                        cols.append(offset + j)
         return torch.tensor([rows, cols], dtype=torch.long, device=device)
 
 

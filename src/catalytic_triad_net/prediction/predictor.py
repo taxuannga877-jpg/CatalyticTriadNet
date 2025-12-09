@@ -83,6 +83,105 @@ class EnhancedCatalyticSiteInference:
             ),
         }
 
+    def print_results(self, results: Dict, top_k: int = 10):
+        """打印预测结果"""
+        print(f"\n{'='*60}")
+        print(f"PDB: {results['pdb_id']}")
+        print(f"预测EC类别: EC {results['ec1_prediction']} (置信度: {results['ec1_confidence']:.3f})")
+        print(f"{'='*60}")
+
+        print(f"\n催化残基 (Top {top_k}):")
+        print(f"{'序号':<6} {'链':<4} {'残基':<8} {'编号':<6} {'概率':<8}")
+        print("-" * 40)
+
+        for i, res in enumerate(results['catalytic_residues'][:top_k], 1):
+            print(f"{i:<6} {res['chain']:<4} {res['resname']:<8} {res['resseq']:<6} {res['site_prob']:.4f}")
+
+        if results.get('triads'):
+            print(f"\n检测到的催化三联体: {len(results['triads'])} 个")
+            for i, triad in enumerate(results['triads'][:3], 1):
+                print(f"  三联体 {i}: {triad.get('type', 'unknown')}")
+
+        if results.get('bimetallic_centers'):
+            print(f"\n双金属中心: {len(results['bimetallic_centers'])} 个")
+
+    def export_pymol(self, results: Dict, output_path: str, threshold: float = 0.5):
+        """导出PyMOL脚本"""
+        with open(output_path, 'w') as f:
+            f.write("# PyMOL script for catalytic site visualization\n")
+            f.write(f"# PDB: {results['pdb_id']}\n\n")
+
+            f.write("# 加载结构\n")
+            f.write(f"load {results['pdb_id']}.pdb\n")
+            f.write("hide everything\n")
+            f.write("show cartoon\n")
+            f.write("color gray80\n\n")
+
+            f.write("# 催化残基\n")
+            for res in results['catalytic_residues']:
+                if res['site_prob'] >= threshold:
+                    f.write(f"select cat_{res['chain']}{res['resseq']}, "
+                           f"chain {res['chain']} and resi {res['resseq']}\n")
+                    f.write(f"show sticks, cat_{res['chain']}{res['resseq']}\n")
+                    f.write(f"color red, cat_{res['chain']}{res['resseq']}\n")
+
+            f.write("\n# 视图设置\n")
+            f.write("zoom\n")
+            f.write("bg_color white\n")
+
+        print(f"✓ PyMOL脚本: {output_path}")
+
+    def export_for_proteinmpnn(self, results: Dict, output_path: str):
+        """导出ProteinMPNN格式"""
+        import json
+
+        # ProteinMPNN 需要固定的残基位置
+        fixed_positions = []
+        for res in results['catalytic_residues']:
+            fixed_positions.append({
+                'chain': res['chain'],
+                'position': res['resseq'],
+                'residue': res['resname']
+            })
+
+        mpnn_data = {
+            'pdb_id': results['pdb_id'],
+            'fixed_positions': fixed_positions,
+            'design_mode': 'fixed_backbone',
+            'temperature': 0.1
+        }
+
+        with open(output_path, 'w') as f:
+            json.dump(mpnn_data, f, indent=2)
+
+        print(f"✓ ProteinMPNN格式: {output_path}")
+
+    def export_for_rfdiffusion(self, results: Dict, output_path: str):
+        """导出RFdiffusion格式"""
+        import json
+
+        # RFdiffusion 需要约束信息
+        constraints = []
+        for res in results['catalytic_residues']:
+            constraints.append({
+                'chain': res['chain'],
+                'residue': res['resseq'],
+                'type': 'catalytic',
+                'weight': float(res['site_prob'])
+            })
+
+        rfd_data = {
+            'pdb_id': results['pdb_id'],
+            'constraints': constraints,
+            'diffusion_steps': 50,
+            'guidance_scale': 1.0
+        }
+
+        with open(output_path, 'w') as f:
+            json.dump(rfd_data, f, indent=2)
+
+        print(f"✓ RFdiffusion格式: {output_path}")
+
 
 # 兼容旧接口
 CatalyticSiteInference = EnhancedCatalyticSiteInference
