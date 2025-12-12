@@ -155,3 +155,13 @@ charges
 wbo
 xtbrestart
 xtbtopo.mol
+
+# Documentation drafts and summaries
+*_SUMMARY.md
+*_GUIDE.md
+CI_SETUP.md
+FIXES_SUMMARY.md
+REFACTORING_SUMMARY.md
+
+# Temporary directories
+111/

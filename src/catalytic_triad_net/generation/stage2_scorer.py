@@ -461,7 +461,13 @@ class Stage2NanozymeActivityScorer:
             distances = np.linalg.norm(coords - fg_center, axis=1)
 
             # 排除功能团自身的原子
-            min_clearance = np.min(distances[distances > 0.1])
+            valid_distances = distances[distances > 0.1]
+            if valid_distances.size == 0:
+                # 功能团自身或全局重合，视为不可及
+                accessibility_scores.append(0.0)
+                continue
+
+            min_clearance = np.min(valid_distances)
 
             # 理想的clearance: 3-5Å
             if 3.0 <= min_clearance <= 5.0:
@@ -723,6 +729,10 @@ class Stage2NanozymeActivityScorer:
                 logger.error(f"评估纳米酶 {i} 失败: {e}")
 
         # 按分数排序
+        if not scored_nanozymes:
+            logger.warning("未生成任何评分结果，返回空列表")
+            return []
+
         scored_nanozymes.sort(key=lambda x: x[1]['total_score'], reverse=True)
 
         logger.info(f"评估完成! 最高分: {scored_nanozymes[0][1]['total_score']:.3f}")
@@ -749,10 +759,18 @@ class Stage2NanozymeActivityScorer:
 
         explanation += f"\n分项得分:\n"
         scores = result['component_scores']
-        explanation += f"  NAC几何: {scores['nac_geometry']:.3f} (权重 60%)\n"
-        explanation += f"  可及性: {scores['accessibility']:.3f} (权重 20%)\n"
-        explanation += f"  协同性: {scores['synergy']:.3f} (权重 10%)\n"
-        explanation += f"  稳定性: {scores['stability']:.3f} (权重 10%)\n"
+        use_ts = result.get('ts_enabled') and 'ts_details' in result
+        if use_ts:
+            explanation += f"  NAC几何: {scores['nac_geometry']:.3f} (权重 40%)\n"
+            explanation += f"  可及性: {scores['accessibility']:.3f} (权重 15%)\n"
+            explanation += f"  协同性: {scores['synergy']:.3f} (权重 8%)\n"
+            explanation += f"  稳定性: {scores['stability']:.3f} (权重 7%)\n"
+            explanation += f"  TS计算: {scores.get('ts_calculation', 0.0):.3f} (权重 30%)\n"
+        else:
+            explanation += f"  NAC几何: {scores['nac_geometry']:.3f} (权重 60%)\n"
+            explanation += f"  可及性: {scores['accessibility']:.3f} (权重 20%)\n"
+            explanation += f"  协同性: {scores['synergy']:.3f} (权重 10%)\n"
+            explanation += f"  稳定性: {scores['stability']:.3f} (权重 10%)\n"
 
         explanation += f"\n活性预测:\n"
         pred = result['activity_prediction']

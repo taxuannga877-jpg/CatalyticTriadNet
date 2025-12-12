@@ -1,30 +1,34 @@
 #!/usr/bin/env python3
 """
-Swiss-Prot数据获取和解析模块
+Swiss-Prot data fetching and parsing module.
 
-Swiss-Prot是UniProtKB的人工审核部分，包含570,000+高质量蛋白质序列
-相比M-CSA的~1,000条目，Swiss-Prot提供了更大规模的训练数据
+Swiss-Prot is the manually curated section of UniProtKB, containing 570,000+
+high-quality protein sequences. Compared to M-CSA's ~1,000 entries, Swiss-Prot
+provides much larger-scale training data.
 
-数据来源：
+Data source:
 - UniProt REST API: https://rest.uniprot.org/
-- 数据量：570,000+ 蛋白质序列
-- 酶数据：~200,000 条目
+- Data volume: 570,000+ protein sequences
+- Enzyme data: ~200,000 entries
 """
 
 import requests
 import json
 import time
+import hashlib
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 import logging
+
+from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class SwissProtEntry:
-    """Swiss-Prot条目"""
+    """Swiss-Prot entry data structure."""
     uniprot_id: str
     protein_name: str
     organism: str
@@ -40,63 +44,132 @@ class SwissProtEntry:
 
 class SwissProtDataFetcher:
     """
-    Swiss-Prot数据获取器
+    Swiss-Prot data fetcher with robust error handling.
 
-    使用UniProt REST API获取酶数据
+    Features:
+    - Automatic retry with exponential backoff
+    - Rate limiting for API requests
+    - Cache validation with checksums
+    - Offline mode support
+    - Comprehensive error handling
 
-    使用示例:
+    Usage example:
         fetcher = SwissProtDataFetcher()
 
-        # 获取所有水解酶（EC 3）
+        # Fetch all hydrolases (EC 3)
         entries = fetcher.fetch_enzymes_by_ec_class(ec_class='3', limit=1000)
 
-        # 获取特定EC号的酶
+        # Fetch enzymes by specific EC number
         entries = fetcher.fetch_enzymes_by_ec_number('3.4.21.4')
 
-        # 获取有PDB结构的酶
+        # Fetch enzymes with PDB structures
         entries = fetcher.fetch_enzymes_with_structure(ec_class='3', limit=500)
     """
 
     BASE_URL = "https://rest.uniprot.org/uniprotkb"
 
-    def __init__(self, cache_dir: str = './data/swissprot_cache'):
+    def __init__(self, cache_dir: Optional[str] = None, config=None):
         """
+        Initialize Swiss-Prot data fetcher.
+
         Args:
-            cache_dir: 缓存目录
+            cache_dir: Cache directory (uses config if None)
+            config: Configuration object (uses global config if None)
         """
-        self.cache_dir = Path(cache_dir)
+        self.config = config or get_config()
+
+        if cache_dir is None:
+            self.cache_dir = self.config.swissprot_cache
+        else:
+            self.cache_dir = Path(cache_dir)
+
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Swiss-Prot数据获取器初始化: cache_dir={cache_dir}")
+        # Load configuration parameters
+        self.timeout = self.config.get('data.request_timeout', 30)
+        self.max_retries = self.config.get('data.max_retries', 3)
+        self.retry_delay = self.config.get('data.retry_delay', 1.0)
+        self.rate_limit = self.config.get('data.rate_limit', 0.5)
+        self.offline_mode = self.config.get('data.offline_mode', False)
+        self.validate_cache = self.config.get('data.validate_cache', True)
+
+        self._last_request_time = 0
+
+        logger.info(f"Swiss-Prot data fetcher initialized: cache_dir={self.cache_dir}, "
+                   f"offline_mode={self.offline_mode}")
 
     def fetch_enzymes_by_ec_class(
         self,
         ec_class: str,
         limit: int = 1000,
         reviewed: bool = True,
-        has_structure: bool = False
+        has_structure: bool = False,
+        has_active_site: bool = False,
+        has_catalytic_activity: bool = False
     ) -> List[Dict]:
         """
-        按EC分类获取酶数据
+        Fetch enzyme data by EC classification with fine-grained filtering.
 
         Args:
-            ec_class: EC分类 ('1', '2', '3', '4', '5', '6', '7')
-            limit: 最大条目数
-            reviewed: 仅获取Swiss-Prot审核过的条目
-            has_structure: 仅获取有PDB结构的条目
+            ec_class: EC classification ('1', '2', '3', '4', '5', '6', '7')
+            limit: Maximum number of entries
+            reviewed: Only fetch Swiss-Prot reviewed entries (recommended True)
+            has_structure: Only fetch entries with PDB structures (recommended True for training)
+            has_active_site: Only fetch entries with active site annotations (recommended True)
+            has_catalytic_activity: Only fetch entries with catalytic activity descriptions (recommended True)
 
         Returns:
-            条目列表
+            List of entry dictionaries
+
+        Recommended configurations:
+            # High-quality training data (most strict)
+            fetch_enzymes_by_ec_class(
+                ec_class='3',
+                reviewed=True,
+                has_structure=True,
+                has_active_site=True,
+                has_catalytic_activity=True
+            )
+
+            # Medium quality (balance quantity and quality)
+            fetch_enzymes_by_ec_class(
+                ec_class='3',
+                reviewed=True,
+                has_structure=True,
+                has_active_site=True
+            )
+
+            # Large-scale data (only require EC number)
+            fetch_enzymes_by_ec_class(
+                ec_class='3',
+                reviewed=True
+            )
         """
         cache_file = self.cache_dir / f"ec{ec_class}_limit{limit}_struct{has_structure}.json"
+        metadata_file = cache_file.with_suffix('.meta.json')
 
-        # 检查缓存
+        # Check cache
         if cache_file.exists():
-            logger.info(f"从缓存加载: {cache_file}")
-            with open(cache_file, 'r') as f:
-                return json.load(f)
+            if self.validate_cache and not self._validate_cache_file(cache_file, metadata_file):
+                logger.warning(f"Cache validation failed for {cache_file.name}, re-fetching")
+                cache_file.unlink(missing_ok=True)
+                metadata_file.unlink(missing_ok=True)
+            else:
+                logger.info(f"Loading from cache: {cache_file}")
+                try:
+                    with open(cache_file, 'r') as f:
+                        return json.load(f)
+                except Exception as e:
+                    logger.error(f"Failed to load cache: {e}")
+                    cache_file.unlink(missing_ok=True)
+                    metadata_file.unlink(missing_ok=True)
 
-        # 构建查询
+        # Offline mode check
+        if self.offline_mode:
+            logger.error(f"Offline mode enabled and no cache found for EC {ec_class}")
+            return []
+
+        # Build query
         query_parts = [f"(ec:{ec_class}.*)"]
 
         if reviewed:
@@ -107,31 +180,36 @@ class SwissProtDataFetcher:
 
         query = " AND ".join(query_parts)
 
-        logger.info(f"查询Swiss-Prot: EC {ec_class}, limit={limit}")
-        logger.info(f"查询字符串: {query}")
+        logger.info(f"Querying Swiss-Prot: EC {ec_class}, limit={limit}")
+        logger.info(f"Query string: {query}")
 
-        # 发送请求
+        # Send request
         params = {
             'query': query,
             'format': 'json',
-            'size': min(limit, 500),  # API限制每次最多500
+            'size': min(limit * 2, 500),  # Fetch more for filtering
             'fields': 'accession,id,protein_name,organism_name,sequence,ec,xref_pdb,ft_act_site,ft_binding,ft_metal,cc_catalytic_activity,cc_function'
         }
 
-        entries = []
+        raw_entries = []
         cursor = None
 
-        while len(entries) < limit:
+        # Fetch raw data (may need filtering)
+        while len(raw_entries) < limit * 2:
             if cursor:
                 params['cursor'] = cursor
 
             try:
-                response = requests.get(
+                # Apply rate limiting
+                self._apply_rate_limit()
+
+                response = self._request_with_retry(
                     f"{self.BASE_URL}/search",
-                    params=params,
-                    timeout=30
+                    params=params
                 )
-                response.raise_for_status()
+
+                if response is None:
+                    break
 
                 data = response.json()
                 results = data.get('results', [])
@@ -139,28 +217,60 @@ class SwissProtDataFetcher:
                 if not results:
                     break
 
-                entries.extend(results)
-                logger.info(f"已获取 {len(entries)} 条目...")
+                raw_entries.extend(results)
+                logger.info(f"Fetched {len(raw_entries)} raw entries...")
 
-                # 获取下一页的cursor
+                # Get next page cursor
                 cursor = response.headers.get('x-next-cursor')
                 if not cursor:
                     break
 
-                # 避免请求过快
-                time.sleep(0.5)
-
             except Exception as e:
-                logger.error(f"请求失败: {e}")
+                logger.error(f"Request failed: {e}")
                 break
 
-        # 保存缓存
-        with open(cache_file, 'w') as f:
-            json.dump(entries[:limit], f, indent=2)
+        # Post-filtering: filter by additional conditions
+        filtered_entries = []
 
-        logger.info(f"✓ 获取完成: {len(entries[:limit])} 条目")
+        for entry in raw_entries:
+            # Check if all conditions are met
+            if has_active_site:
+                # Must have active site annotation
+                has_act_site = False
+                if entry.get('features'):
+                    for feat in entry['features']:
+                        if feat.get('type') == 'Active site':
+                            has_act_site = True
+                            break
+                if not has_act_site:
+                    continue
 
-        return entries[:limit]
+            if has_catalytic_activity:
+                # Must have catalytic activity description
+                has_cat_activity = False
+                if entry.get('comments'):
+                    for comment in entry['comments']:
+                        if comment.get('commentType') == 'CATALYTIC ACTIVITY':
+                            has_cat_activity = True
+                            break
+                if not has_cat_activity:
+                    continue
+
+            # Passed all filtering conditions
+            filtered_entries.append(entry)
+
+            if len(filtered_entries) >= limit:
+                break
+
+        logger.info(f"After filtering: {len(filtered_entries)}/{len(raw_entries)} entries")
+
+        # Save cache with metadata
+        if filtered_entries:
+            self._save_cache_with_metadata(cache_file, metadata_file, filtered_entries)
+
+        logger.info(f"Fetch complete: {len(filtered_entries)} high-quality entries")
+
+        return filtered_entries
 
     def fetch_enzymes_by_ec_number(
         self,
@@ -168,21 +278,36 @@ class SwissProtDataFetcher:
         limit: int = 100
     ) -> List[Dict]:
         """
-        按精确EC号获取酶数据
+        Fetch enzyme data by exact EC number.
 
         Args:
-            ec_number: 完整EC号 (如 '3.4.21.4')
-            limit: 最大条目数
+            ec_number: Complete EC number (e.g., '3.4.21.4')
+            limit: Maximum number of entries
 
         Returns:
-            条目列表
+            List of entry dictionaries
         """
         cache_file = self.cache_dir / f"ec_{ec_number.replace('.', '_')}.json"
+        metadata_file = cache_file.with_suffix('.meta.json')
 
+        # Check cache
         if cache_file.exists():
-            logger.info(f"从缓存加载: {cache_file}")
-            with open(cache_file, 'r') as f:
-                return json.load(f)
+            if self.validate_cache and not self._validate_cache_file(cache_file, metadata_file):
+                logger.warning(f"Cache validation failed, re-fetching")
+                cache_file.unlink(missing_ok=True)
+                metadata_file.unlink(missing_ok=True)
+            else:
+                logger.info(f"Loading from cache: {cache_file}")
+                try:
+                    with open(cache_file, 'r') as f:
+                        return json.load(f)
+                except Exception as e:
+                    logger.error(f"Failed to load cache: {e}")
+
+        # Offline mode check
+        if self.offline_mode:
+            logger.error(f"Offline mode enabled and no cache found for EC {ec_number}")
+            return []
 
         query = f"(ec:{ec_number}) AND (reviewed:true)"
 
@@ -194,26 +319,30 @@ class SwissProtDataFetcher:
         }
 
         try:
-            response = requests.get(
+            # Apply rate limiting
+            self._apply_rate_limit()
+
+            response = self._request_with_retry(
                 f"{self.BASE_URL}/search",
-                params=params,
-                timeout=30
+                params=params
             )
-            response.raise_for_status()
+
+            if response is None:
+                return []
 
             data = response.json()
             entries = data.get('results', [])
 
-            # 保存缓存
-            with open(cache_file, 'w') as f:
-                json.dump(entries, f, indent=2)
+            # Save cache with metadata
+            if entries:
+                self._save_cache_with_metadata(cache_file, metadata_file, entries)
 
-            logger.info(f"✓ 获取 EC {ec_number}: {len(entries)} 条目")
+            logger.info(f"Fetched EC {ec_number}: {len(entries)} entries")
 
             return entries
 
         except Exception as e:
-            logger.error(f"请求失败: {e}")
+            logger.error(f"Request failed: {e}")
             return []
 
     def fetch_enzymes_with_structure(
@@ -222,14 +351,14 @@ class SwissProtDataFetcher:
         limit: int = 500
     ) -> List[Dict]:
         """
-        获取有PDB结构的酶数据
+        Fetch enzyme data with PDB structures.
 
         Args:
-            ec_class: EC分类
-            limit: 最大条目数
+            ec_class: EC classification
+            limit: Maximum number of entries
 
         Returns:
-            条目列表
+            List of entry dictionaries
         """
         return self.fetch_enzymes_by_ec_class(
             ec_class=ec_class,
@@ -240,13 +369,13 @@ class SwissProtDataFetcher:
 
     def get_statistics(self, entries: List[Dict]) -> Dict:
         """
-        统计Swiss-Prot数据
+        Compute statistics for Swiss-Prot data.
 
         Args:
-            entries: 条目列表
+            entries: List of entry dictionaries
 
         Returns:
-            统计信息
+            Dictionary of statistics
         """
         stats = {
             'total_entries': len(entries),
@@ -259,35 +388,35 @@ class SwissProtDataFetcher:
         }
 
         for entry in entries:
-            # PDB结构
+            # PDB structures
             if entry.get('uniProtKBCrossReferences'):
                 pdb_refs = [ref for ref in entry['uniProtKBCrossReferences']
                            if ref.get('database') == 'PDB']
                 if pdb_refs:
                     stats['with_pdb'] += 1
 
-            # 活性位点
+            # Active sites
             if entry.get('features'):
                 for feat in entry['features']:
                     if feat.get('type') == 'Active site':
                         stats['with_active_site'] += 1
                         break
 
-            # 结合位点
+            # Binding sites
             if entry.get('features'):
                 for feat in entry['features']:
                     if feat.get('type') == 'Binding site':
                         stats['with_binding_site'] += 1
                         break
 
-            # 金属结合
+            # Metal binding
             if entry.get('features'):
                 for feat in entry['features']:
                     if feat.get('type') == 'Metal binding':
                         stats['with_metal'] += 1
                         break
 
-            # EC分布
+            # EC distribution
             if entry.get('proteinDescription', {}).get('recommendedName', {}).get('ecNumbers'):
                 ec_numbers = entry['proteinDescription']['recommendedName']['ecNumbers']
                 for ec in ec_numbers:
@@ -295,38 +424,155 @@ class SwissProtDataFetcher:
                     ec_class = ec_value.split('.')[0] if ec_value else 'unknown'
                     stats['ec_distribution'][ec_class] = stats['ec_distribution'].get(ec_class, 0) + 1
 
-            # 物种分布
+            # Organism distribution
             organism = entry.get('organism', {}).get('scientificName', 'unknown')
             stats['organism_distribution'][organism] = stats['organism_distribution'].get(organism, 0) + 1
 
         return stats
 
+    def _request_with_retry(self, url: str, params: Dict) -> Optional[requests.Response]:
+        """
+        Make HTTP request with retry mechanism.
+
+        Args:
+            url: Request URL
+            params: Request parameters
+
+        Returns:
+            Response object or None if all retries failed
+        """
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.get(url, params=params, timeout=self.timeout)
+                response.raise_for_status()
+                return response
+
+            except requests.Timeout:
+                logger.warning(f"Timeout on attempt {attempt + 1}/{self.max_retries}")
+            except requests.RequestException as e:
+                logger.warning(f"Request error on attempt {attempt + 1}/{self.max_retries}: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error on attempt {attempt + 1}/{self.max_retries}: {e}")
+
+            # Exponential backoff
+            if attempt < self.max_retries - 1:
+                delay = self.retry_delay * (2 ** attempt)
+                logger.info(f"Retrying in {delay:.1f} seconds...")
+                time.sleep(delay)
+
+        logger.error(f"Failed to fetch data after {self.max_retries} attempts")
+        return None
+
+    def _apply_rate_limit(self):
+        """Apply rate limiting between requests."""
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self.rate_limit:
+            time.sleep(self.rate_limit - elapsed)
+        self._last_request_time = time.time()
+
+    def _validate_cache_file(self, cache_file: Path, metadata_file: Path) -> bool:
+        """
+        Validate cached file using metadata.
+
+        Args:
+            cache_file: Path to cache file
+            metadata_file: Path to metadata file
+
+        Returns:
+            True if file is valid, False otherwise
+        """
+        if not metadata_file.exists():
+            return False
+
+        try:
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+
+            # Check file size
+            actual_size = cache_file.stat().st_size
+            if actual_size != metadata.get('size', -1):
+                logger.warning(f"Size mismatch for {cache_file.name}")
+                return False
+
+            # Check checksum
+            with open(cache_file, 'r') as f:
+                content = f.read()
+            actual_checksum = hashlib.md5(content.encode()).hexdigest()
+            if actual_checksum != metadata.get('checksum', ''):
+                logger.warning(f"Checksum mismatch for {cache_file.name}")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"Failed to validate cache for {cache_file.name}: {e}")
+            return False
+
+    def _save_cache_with_metadata(self, cache_file: Path, metadata_file: Path, data: List[Dict]):
+        """
+        Save cache file with metadata atomically.
+
+        Args:
+            cache_file: Path to cache file
+            metadata_file: Path to metadata file
+            data: Data to save
+        """
+        temp_file = cache_file.with_suffix('.tmp')
+
+        try:
+            # Write data to temporary file
+            with open(temp_file, 'w') as f:
+                json.dump(data, f, indent=2)
+
+            # Create metadata
+            with open(temp_file, 'r') as f:
+                content = f.read()
+
+            metadata = {
+                'timestamp': time.time(),
+                'size': len(content),
+                'checksum': hashlib.md5(content.encode()).hexdigest(),
+                'num_entries': len(data)
+            }
+
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f)
+
+            # Atomic rename
+            temp_file.rename(cache_file)
+            logger.debug(f"Saved cache: {cache_file}")
+
+        except Exception as e:
+            logger.error(f"Failed to save cache: {e}")
+            temp_file.unlink(missing_ok=True)
+            raise
+
 
 class SwissProtDataParser:
     """
-    Swiss-Prot数据解析器
+    Swiss-Prot data parser.
 
-    将Swiss-Prot JSON数据解析为结构化对象
+    Parses Swiss-Prot JSON data into structured objects.
     """
 
     @staticmethod
     def parse_entry(entry: Dict) -> SwissProtEntry:
         """
-        解析单个Swiss-Prot条目
+        Parse single Swiss-Prot entry.
 
         Args:
-            entry: Swiss-Prot JSON条目
+            entry: Swiss-Prot JSON entry
 
         Returns:
-            SwissProtEntry对象
+            SwissProtEntry object
         """
-        # 基本信息
+        # Basic information
         uniprot_id = entry.get('primaryAccession', '')
         protein_name = entry.get('proteinDescription', {}).get('recommendedName', {}).get('fullName', {}).get('value', '')
         organism = entry.get('organism', {}).get('scientificName', '')
         sequence = entry.get('sequence', {}).get('value', '')
 
-        # EC号
+        # EC number
         ec_number = None
         if entry.get('proteinDescription', {}).get('recommendedName', {}).get('ecNumbers'):
             ec_numbers = entry['proteinDescription']['recommendedName']['ecNumbers']
@@ -340,7 +586,7 @@ class SwissProtDataParser:
                 if ref.get('database') == 'PDB':
                     pdb_ids.append(ref.get('id'))
 
-        # 活性位点
+        # Active sites
         active_sites = []
         binding_sites = []
         metal_binding = []
@@ -368,7 +614,7 @@ class SwissProtDataParser:
                         'description': description
                     })
 
-        # 催化活性
+        # Catalytic activity
         catalytic_activity = None
         if entry.get('comments'):
             for comment in entry['comments']:
@@ -377,7 +623,7 @@ class SwissProtDataParser:
                     catalytic_activity = reaction.get('name', '')
                     break
 
-        # 功能
+        # Function
         function = None
         if entry.get('comments'):
             for comment in entry['comments']:
@@ -404,13 +650,13 @@ class SwissProtDataParser:
     @staticmethod
     def parse_entries(entries: List[Dict]) -> List[SwissProtEntry]:
         """
-        批量解析Swiss-Prot条目
+        Parse multiple Swiss-Prot entries.
 
         Args:
-            entries: Swiss-Prot JSON条目列表
+            entries: List of Swiss-Prot JSON entries
 
         Returns:
-            SwissProtEntry对象列表
+            List of SwissProtEntry objects
         """
         parsed_entries = []
 
@@ -419,13 +665,13 @@ class SwissProtDataParser:
                 parsed = SwissProtDataParser.parse_entry(entry)
                 parsed_entries.append(parsed)
             except Exception as e:
-                logger.warning(f"解析条目失败: {e}")
+                logger.warning(f"Failed to parse entry: {e}")
 
         return parsed_entries
 
 
 # =============================================================================
-# 导出
+# Exports
 # =============================================================================
 
 __all__ = [
@@ -436,36 +682,36 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    # 测试代码
-    print("Swiss-Prot数据获取器 - 测试")
+    # Test code
+    print("Swiss-Prot Data Fetcher - Test")
     print("="*60)
 
     fetcher = SwissProtDataFetcher()
 
-    # 获取水解酶数据
-    print("\n获取水解酶（EC 3）数据...")
+    # Fetch hydrolase data
+    print("\nFetching hydrolase (EC 3) data...")
     entries = fetcher.fetch_enzymes_by_ec_class(ec_class='3', limit=100)
 
-    print(f"\n✓ 获取了 {len(entries)} 个条目")
+    print(f"\nFetched {len(entries)} entries")
 
-    # 统计
+    # Statistics
     stats = fetcher.get_statistics(entries)
-    print(f"\n统计信息:")
-    print(f"  总条目数: {stats['total_entries']}")
-    print(f"  有PDB结构: {stats['with_pdb']}")
-    print(f"  有活性位点标注: {stats['with_active_site']}")
-    print(f"  有结合位点标注: {stats['with_binding_site']}")
-    print(f"  有金属结合标注: {stats['with_metal']}")
+    print(f"\nStatistics:")
+    print(f"  Total entries: {stats['total_entries']}")
+    print(f"  With PDB structure: {stats['with_pdb']}")
+    print(f"  With active site annotation: {stats['with_active_site']}")
+    print(f"  With binding site annotation: {stats['with_binding_site']}")
+    print(f"  With metal binding annotation: {stats['with_metal']}")
 
-    # 解析第一个条目
+    # Parse first entry
     if entries:
-        print(f"\n解析第一个条目...")
+        print(f"\nParsing first entry...")
         parser = SwissProtDataParser()
         parsed = parser.parse_entry(entries[0])
 
         print(f"\nUniProt ID: {parsed.uniprot_id}")
-        print(f"蛋白质名称: {parsed.protein_name}")
-        print(f"EC号: {parsed.ec_number}")
+        print(f"Protein name: {parsed.protein_name}")
+        print(f"EC number: {parsed.ec_number}")
         print(f"PDB IDs: {parsed.pdb_ids}")
-        print(f"活性位点数: {len(parsed.active_sites)}")
-        print(f"序列长度: {len(parsed.sequence)}")
+        print(f"Number of active sites: {len(parsed.active_sites)}")
+        print(f"Sequence length: {len(parsed.sequence)}")

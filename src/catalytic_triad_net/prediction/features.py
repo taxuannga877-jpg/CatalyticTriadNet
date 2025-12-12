@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import logging
 
+from ..config import get_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -68,6 +70,9 @@ class ElectronicFeatureEncoder:
     """
     电子结构特征编码器
     参考: xtb (https://github.com/grimme-lab/xtb)
+
+    计算电子结构相关特征，包括部分电荷、电负性、极化率等。
+    支持 xTB 量化计算（可选），如果不可用则使用预计算值。
     """
 
     # 氨基酸侧链部分电荷 (预计算, 基于GFN2-xTB)
@@ -94,23 +99,60 @@ class ElectronicFeatureEncoder:
         'VAL': {'CA': 0.12, 'CB': -0.05},
     }
 
-    def __init__(self, xtb_path: str = None):
+    def __init__(self, xtb_path: Optional[str] = None):
+        """
+        初始化电子特征编码器。
+
+        Args:
+            xtb_path: xTB 可执行文件路径（可选）
+        """
         self.xtb_path = xtb_path
         self.xtb_available = self._check_xtb()
 
-    def _check_xtb(self) -> bool:
-        """检查xTB是否可用"""
-        if self.xtb_path and Path(self.xtb_path).exists():
-            return True
-        try:
-            result = subprocess.run(['xtb', '--version'], capture_output=True, timeout=5)
-            return result.returncode == 0
-        except Exception:
-            return False
+        if self.xtb_available:
+            logger.info("xTB is available for electronic feature calculation")
+        else:
+            logger.info("xTB not available, using precomputed electronic features")
 
-    def compute_features(self, residue: Dict, all_coords: np.ndarray = None) -> np.ndarray:
+    def _check_xtb(self) -> bool:
         """
-        计算单个残基的电子特征 (6维)
+        检查 xTB 是否可用。
+
+        Returns:
+            bool: xTB 是否可用
+        """
+        # 首先检查指定路径
+        if self.xtb_path:
+            xtb_path = Path(self.xtb_path)
+            if xtb_path.exists():
+                logger.debug(f"Found xTB at specified path: {self.xtb_path}")
+                return True
+            else:
+                logger.warning(f"xTB path specified but not found: {self.xtb_path}")
+
+        # 尝试在系统 PATH 中查找
+        try:
+            result = subprocess.run(
+                ['xtb', '--version'],
+                capture_output=True,
+                timeout=5,
+                text=True
+            )
+            if result.returncode == 0:
+                logger.debug("Found xTB in system PATH")
+                return True
+        except FileNotFoundError:
+            logger.debug("xTB not found in system PATH")
+        except subprocess.TimeoutExpired:
+            logger.warning("xTB version check timed out")
+        except Exception as e:
+            logger.debug(f"Error checking xTB availability: {e}")
+
+        return False
+
+    def compute_features(self, residue: Dict, all_coords: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        计算单个残基的电子特征 (6维)。
 
         特征:
         - 侧链净电荷
@@ -119,6 +161,13 @@ class ElectronicFeatureEncoder:
         - 极化率
         - 氧化还原活性
         - 反应活性指数
+
+        Args:
+            residue: 残基信息字典，包含 'name' 等字段
+            all_coords: 所有原子坐标（可选，用于 xTB 计算）
+
+        Returns:
+            np.ndarray: 形状为 (6,) 的电子特征向量
         """
         res_name = residue.get('name', 'ALA')
         props = AA_PROPERTIES.get(res_name, AA_PROPERTIES['ALA'])
@@ -144,7 +193,7 @@ class ElectronicFeatureEncoder:
         # 反应活性指数
         reactivity = (electronegativity + polarizability) / 2.0
 
-        return np.array([
+        features = np.array([
             sidechain_charge,
             max_partial,
             electronegativity,
@@ -152,6 +201,11 @@ class ElectronicFeatureEncoder:
             redox_activity,
             reactivity
         ], dtype=np.float32)
+
+        # 形状断言
+        assert features.shape == (6,), f"Expected shape (6,), got {features.shape}"
+
+        return features
 
 
 # =============================================================================
@@ -162,15 +216,23 @@ class SubstrateAwareEncoder:
     """
     底物感知特征编码器
     参考: P2Rank, fpocket
+
+    计算与底物/配体相关的特征，用于识别结合口袋和催化位点。
     """
 
     def __init__(self, pocket_probe_radius: float = 3.0):
+        """
+        初始化底物感知编码器。
+
+        Args:
+            pocket_probe_radius: 口袋探测半径（Å）
+        """
         self.pocket_probe_radius = pocket_probe_radius
 
     def compute_features(self, residue_idx: int, ca_coords: np.ndarray,
                          ligands: List[Dict], metals: List[Dict]) -> np.ndarray:
         """
-        计算底物感知特征 (6维)
+        计算底物感知特征 (6维)。
 
         特征:
         - 到最近配体的距离
@@ -179,16 +241,39 @@ class SubstrateAwareEncoder:
         - 是否在结合口袋内
         - 口袋暴露度
         - 底物相互作用潜力
+
+        Args:
+            residue_idx: 残基索引
+            ca_coords: CA 原子坐标数组，形状 (N, 3)
+            ligands: 配体列表
+            metals: 金属离子列表
+
+        Returns:
+            np.ndarray: 形状为 (6,) 的底物感知特征向量
         """
+        # 输入验证
+        assert 0 <= residue_idx < len(ca_coords), f"Invalid residue_idx: {residue_idx}"
+        assert ca_coords.ndim == 2 and ca_coords.shape[1] == 3, \
+            f"Expected ca_coords shape (N, 3), got {ca_coords.shape}"
+
         coord = ca_coords[residue_idx]
         features = np.zeros(6, dtype=np.float32)
 
         # 合并配体和金属
         all_ligands = ligands + metals
 
+        # 如果没有配体，返回默认值（约定：远距离）
         if not all_ligands:
-            features[0] = 999.0
-            features[1] = 1.0
+            features[0] = 999.0  # 远距离
+            features[1] = 1.0    # 归一化距离
+            features[2] = 0.0    # 无邻居
+            features[3] = 0.0    # 不在口袋内
+            features[4] = 0.5    # 中等暴露度
+            features[5] = 0.0    # 无相互作用
+            logger.debug(f"No ligands found for residue {residue_idx}, using default features")
+
+            # 形状断言
+            assert features.shape == (6,), f"Expected shape (6,), got {features.shape}"
             return features
 
         ligand_coords = np.array([l['coord'] for l in all_ligands])
@@ -213,6 +298,9 @@ class SubstrateAwareEncoder:
 
         # 底物相互作用潜力
         features[5] = np.sum(np.exp(-distances / 5.0))
+
+        # 形状断言
+        assert features.shape == (6,), f"Expected shape (6,), got {features.shape}"
 
         return features
 
@@ -252,6 +340,8 @@ class ConservationAnalyzer:
     """
     序列保守性分析接口
     参考: ConSurf, EVcouplings
+
+    提供简化的保守性分数。完整实现需要多序列比对和进化分析。
     """
 
     # 简化的BLOSUM62保守性
@@ -263,22 +353,39 @@ class ConservationAnalyzer:
     }
 
     def __init__(self):
-        self.msa_cache = {}
+        """初始化保守性分析器。"""
+        self.msa_cache: Dict[str, float] = {}
 
     def get_conservation_score(self, residue_name: str) -> float:
         """
-        获取保守性分数 (简化版)
+        获取保守性分数 (简化版)。
 
         完整实现需要:
         1. 使用BLAST/HHblits搜索同源序列
         2. 构建多序列比对
         3. 计算位置特异性保守性
+
+        Args:
+            residue_name: 残基名称（三字母代码）
+
+        Returns:
+            float: 保守性分数 (0-1)
         """
         return self.CONSERVATION_SCORES.get(residue_name, 0.5)
 
     def compute_features(self, residue_name: str) -> float:
-        """计算保守性特征"""
-        return self.get_conservation_score(residue_name)
+        """
+        计算保守性特征。
+
+        Args:
+            residue_name: 残基名称（三字母代码）
+
+        Returns:
+            float: 保守性分数
+        """
+        score = self.get_conservation_score(residue_name)
+        assert 0.0 <= score <= 1.0, f"Conservation score out of range: {score}"
+        return score
 
 
 # =============================================================================
@@ -298,8 +405,19 @@ class EnhancedFeatureEncoder:
     - 底物感知: 6
     """
 
-    def __init__(self, config: Dict = None):
-        self.config = config or {}
+    def __init__(self, config: Optional[Dict] = None):
+        """
+        初始化增强特征编码器。
+
+        Args:
+            config: 配置字典（可选）
+        """
+        # 使用全局配置或提供的配置
+        if config is None:
+            global_config = get_config()
+            self.config = global_config.to_dict()
+        else:
+            self.config = config
 
         # 子编码器
         ext_tools = self.config.get('external_tools', {})
@@ -307,14 +425,36 @@ class EnhancedFeatureEncoder:
         self.substrate_encoder = SubstrateAwareEncoder()
         self.conservation_analyzer = ConservationAnalyzer()
 
+        logger.info("EnhancedFeatureEncoder initialized with all sub-encoders")
+
     def encode_metal_env(self, idx: int, coords: np.ndarray, metals: List[Dict],
                          metal_shell_cutoff: float = 5.0,
                          metal_neighbor_cutoff: float = 8.0) -> np.ndarray:
-        """单个残基的金属环境特征 (3维)"""
+        """
+        单个残基的金属环境特征 (3维)。
+
+        Args:
+            idx: 残基索引
+            coords: 坐标数组，形状 (N, 3)
+            metals: 金属离子列表
+            metal_shell_cutoff: 金属壳层截断距离（Å）
+            metal_neighbor_cutoff: 金属邻居截断距离（Å）
+
+        Returns:
+            np.ndarray: 形状为 (3,) 的金属环境特征向量
+        """
+        # 输入验证
+        assert 0 <= idx < len(coords), f"Invalid idx: {idx}"
+        assert coords.ndim == 2 and coords.shape[1] == 3, \
+            f"Expected coords shape (N, 3), got {coords.shape}"
+
         features = np.zeros(3, dtype=np.float32)
 
         if not metals:
-            features[0] = 1.0
+            features[0] = 1.0  # 归一化距离（远）
+            features[1] = 0.0  # 无邻居
+            features[2] = 0.0  # 不在壳层内
+            assert features.shape == (3,), f"Expected shape (3,), got {features.shape}"
             return features
 
         coord = coords[idx]
@@ -326,11 +466,25 @@ class EnhancedFeatureEncoder:
         features[1] = np.sum(dists < metal_neighbor_cutoff) / max(len(metals), 1)
         features[2] = 1.0 if min_dist < metal_shell_cutoff else 0.0
 
+        # 形状断言
+        assert features.shape == (3,), f"Expected shape (3,), got {features.shape}"
+
         return features
 
     def compute_hbond_edge_features(self, i: int, j: int, hbond_pairs: set,
                                      hbonds: List[Dict]) -> np.ndarray:
-        """氢键边特征 (3维)"""
+        """
+        氢键边特征 (3维)。
+
+        Args:
+            i: 第一个残基索引
+            j: 第二个残基索引
+            hbond_pairs: 氢键对集合
+            hbonds: 氢键列表
+
+        Returns:
+            np.ndarray: 形状为 (3,) 的氢键特征向量
+        """
         has_hbond = 1.0 if (i, j) in hbond_pairs else 0.0
 
         hbond_dist = 0.0
@@ -342,4 +496,9 @@ class EnhancedFeatureEncoder:
                 hbond_strength = max(0, 1.0 - (hb['distance'] - 2.5) / 1.0)
                 break
 
-        return np.array([has_hbond, hbond_dist, hbond_strength], dtype=np.float32)
+        features = np.array([has_hbond, hbond_dist, hbond_strength], dtype=np.float32)
+
+        # 形状断言
+        assert features.shape == (3,), f"Expected shape (3,), got {features.shape}"
+
+        return features

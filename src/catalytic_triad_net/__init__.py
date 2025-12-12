@@ -44,6 +44,9 @@ from .prediction.trainer import (
     FocalLoss,
     compute_metrics
 )
+from .prediction.transfer_trainer import (
+    TransferLearningTrainer
+)
 
 from .prediction.analysis import (
     TriadDetector,
@@ -175,6 +178,7 @@ __all__ = [
     "CatalyticSitePredictor",
     "HierarchicalECPredictor",
     "CatalyticTriadTrainer",
+    "TransferLearningTrainer",
     "CatalyticTriadLoss",
     "FocalLoss",
     "compute_metrics",

@@ -1,37 +1,84 @@
 # CatalyticTriadNet Dependencies
 # ================================
+# Updated for RTX 50 Series (SM 12.0 / Blackwell Architecture) Support
+# Last Updated: 2025-12-12
 
 # Core
-numpy>=1.21.0
-pandas>=1.3.0
-scipy>=1.7.0
-scikit-learn>=0.24.0
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
 
-# Deep Learning
-torch>=1.12.0
-torch-geometric>=2.0.0
+# Deep Learning - RTX 50 Series Compatible
+# PyTorch 2.5+ with CUDA 12.4+ required for SM 12.0 support
+torch>=2.5.0
+torchvision>=0.20.0
+torchaudio>=2.5.0
+
+# PyTorch Geometric - Install separately with matching CUDA version
+# See installation instructions below
+torch-geometric>=2.5.0
+torch-scatter>=2.1.2
+torch-sparse>=0.6.18
+torch-cluster>=1.6.3
+torch-spline-conv>=1.2.2
 
 # Bioinformatics
-biopython>=1.79
+biopython>=1.81
+
+# Chemistry
+rdkit>=2023.3.1
+# openbabel>=3.1.1  # Install via conda if needed
 
 # Visualization
-matplotlib>=3.4.0
-seaborn>=0.11.0
-networkx>=2.6.0
-plotly>=5.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+networkx>=3.1
+plotly>=5.14.0
 
 # Utilities
-requests>=2.26.0
-tqdm>=4.62.0
-pathlib2>=2.3.0
+requests>=2.31.0
+tqdm>=4.65.0
+pyyaml>=6.0
 
 # Optional: ESM for sequence features
 # fair-esm>=2.0.0
+
+# Optional: autodE for transition state calculation
+# autode>=1.4.0
 
 # Optional: xTB for electronic features
 # xtb (install via conda: conda install -c conda-forge xtb)
 
 # Development
-pytest>=6.0.0
-black>=21.0.0
-flake8>=3.9.0
+pytest>=7.4.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.4.0
+
+# ================================
+# Installation Instructions for RTX 50 Series
+# ================================
+#
+# Option 1: Using pip with CUDA 12.4+ (Recommended)
+# --------------------------------------------------
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
+# pip install torch-geometric
+# pip install -r requirements.txt
+#
+# Option 2: Using PyTorch Nightly (Latest Features)
+# --------------------------------------------------
+# pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
+# pip install torch-geometric
+# pip install -r requirements.txt
+#
+# Option 3: If AutoDL/Cloud Platform Pre-installed
+# --------------------------------------------------
+# The platform may have pre-configured PyTorch 2.8.0+ with CUDA 12.8
+# Just install remaining dependencies:
+# pip install -r requirements.txt
+#
+# Verify Installation:
+# --------------------
+# python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}'); print(f'GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"

@@ -6,13 +6,14 @@
 
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import json
 import pandas as pd
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .predictor import EnhancedCatalyticSiteInference
+from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -48,20 +49,42 @@ class BatchCatalyticScreener:
         screener.export_for_nanozyme_design(results, 'nanozyme_templates/')
     """
 
-    def __init__(self, model_path: str, device: str = None,
-                 n_workers: int = 4):
+    def __init__(self, model_path: str, device: Optional[str] = None,
+                 n_workers: Optional[int] = None, max_retries: Optional[int] = None,
+                 timeout: Optional[int] = None, config: Optional[Dict] = None):
         """
+        初始化批量筛选器。
+
         Args:
             model_path: 训练好的模型路径
-            device: 'cuda' 或 'cpu'
-            n_workers: 并行处理的线程数
+            device: 'cuda' 或 'cpu'（可选）
+            n_workers: 并行处理的线程数（如果为 None，从 config 读取）
+            max_retries: 最大重试次数（如果为 None，从 config 读取）
+            timeout: 超时时间（秒）（如果为 None，从 config 读取）
+            config: 配置字典（可选）
         """
+        # 从配置读取参数
+        if config is None:
+            global_config = get_config()
+            screening_config = global_config.get('screening', {})
+        else:
+            screening_config = config.get('screening', {})
+
+        self.n_workers = n_workers if n_workers is not None else screening_config.get('num_workers', 4)
+        self.max_retries = max_retries if max_retries is not None else screening_config.get('max_retries', 3)
+        self.timeout = timeout if timeout is not None else screening_config.get('timeout', 300)
+
         self.predictor = EnhancedCatalyticSiteInference(
             model_path=model_path,
-            device=device
+            device=device,
+            config=config
         )
-        self.n_workers = n_workers
-        logger.info(f"批量筛选器初始化完成 (workers={n_workers})")
+
+        # 跟踪失败的任务
+        self.failed_tasks: List[Dict[str, Any]] = []
+
+        logger.info(f"BatchCatalyticScreener initialized: workers={self.n_workers}, "
+                   f"max_retries={self.max_retries}, timeout={self.timeout}s")
 
     def screen_pdb_list(self, pdb_ids: List[str],
                        site_threshold: float = 0.7,
@@ -83,10 +106,10 @@ class BatchCatalyticScreener:
 
         all_results = []
 
-        # 并行处理
+        # 并行处理（带异常捕获和重试）
         with ThreadPoolExecutor(max_workers=self.n_workers) as executor:
             futures = {
-                executor.submit(self._screen_single_pdb, pdb_id,
+                executor.submit(self._screen_single_pdb_with_retry, pdb_id,
                               site_threshold, ec_filter): pdb_id
                 for pdb_id in pdb_ids
             }
@@ -95,11 +118,24 @@ class BatchCatalyticScreener:
                              desc="筛选进度"):
                 pdb_id = futures[future]
                 try:
-                    result = future.result()
+                    result = future.result(timeout=self.timeout)
                     if result:
                         all_results.append(result)
+                except TimeoutError:
+                    error_msg = f"Timeout after {self.timeout}s"
+                    logger.error(f"处理 {pdb_id} 超时: {error_msg}")
+                    self.failed_tasks.append({
+                        'pdb_id': pdb_id,
+                        'error': error_msg,
+                        'type': 'timeout'
+                    })
                 except Exception as e:
                     logger.error(f"处理 {pdb_id} 失败: {e}")
+                    self.failed_tasks.append({
+                        'pdb_id': pdb_id,
+                        'error': str(e),
+                        'type': 'exception'
+                    })
 
         # 展开所有催化残基
         flattened = []
@@ -184,7 +220,17 @@ class BatchCatalyticScreener:
     def _screen_single_pdb(self, pdb_id: str,
                           site_threshold: float,
                           ec_filter: Optional[int]) -> Optional[Dict]:
-        """处理单个PDB"""
+        """
+        处理单个 PDB。
+
+        Args:
+            pdb_id: PDB ID
+            site_threshold: 催化位点阈值
+            ec_filter: EC 类别过滤器
+
+        Returns:
+            Optional[Dict]: 筛选结果，如果失败或不符合条件则返回 None
+        """
         try:
             result = self.predictor.predict(
                 pdb_path=pdb_id,
@@ -193,16 +239,46 @@ class BatchCatalyticScreener:
 
             # EC过滤
             if ec_filter and result['ec1_prediction'] != ec_filter:
+                logger.debug(f"Filtered {pdb_id}: EC{result['ec1_prediction']} != EC{ec_filter}")
                 return None
 
             # 只保留有催化残基的结果
             if not result['catalytic_residues']:
+                logger.debug(f"Filtered {pdb_id}: no catalytic residues found")
                 return None
 
             return result
         except Exception as e:
             logger.warning(f"跳过 {pdb_id}: {e}")
-            return None
+            raise  # 重新抛出异常以便重试机制处理
+
+    def _screen_single_pdb_with_retry(self, pdb_id: str,
+                                     site_threshold: float,
+                                     ec_filter: Optional[int]) -> Optional[Dict]:
+        """
+        带重试机制的单个 PDB 处理。
+
+        Args:
+            pdb_id: PDB ID
+            site_threshold: 催化位点阈值
+            ec_filter: EC 类别过滤器
+
+        Returns:
+            Optional[Dict]: 筛选结果
+        """
+        last_exception = None
+        for attempt in range(self.max_retries):
+            try:
+                return self._screen_single_pdb(pdb_id, site_threshold, ec_filter)
+            except Exception as e:
+                last_exception = e
+                if attempt < self.max_retries - 1:
+                    logger.debug(f"Retry {attempt + 1}/{self.max_retries} for {pdb_id}")
+                else:
+                    logger.error(f"Failed after {self.max_retries} attempts for {pdb_id}: {e}")
+
+        # 所有重试都失败
+        return None
 
     def filter_by_residue_type(self, results: List[Dict],
                                residue_types: List[str]) -> List[Dict]:
@@ -265,17 +341,17 @@ class BatchCatalyticScreener:
                                    output_dir: str,
                                    top_n: int = 20):
         """
-        导出用于纳米酶设计的模板
+        导出用于纳米酶设计的模板。
 
-        为每个高分催化中心生成约束文件
+        为每个高分催化中心生成约束文件，并校验必需字段。
 
         Args:
             results: 筛选结果
             output_dir: 输出目录
             top_n: 导出前N个
         """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir_path = Path(output_dir)
+        output_dir_path.mkdir(parents=True, exist_ok=True)
 
         # 按PDB分组
         from collections import defaultdict
@@ -283,30 +359,57 @@ class BatchCatalyticScreener:
         for r in results[:top_n]:
             by_pdb[r['pdb_id']].append(r)
 
+        exported_count = 0
         for pdb_id, residues in by_pdb.items():
-            # 构建约束文件
-            template = {
-                'source_pdb': pdb_id,
-                'ec_class': residues[0]['ec1_prediction'],
-                'catalytic_residues': [
-                    {
-                        'chain': r['chain'],
-                        'resseq': r['resseq'],
-                        'resname': r['resname'],
-                        'site_prob': r['site_prob']
-                    }
-                    for r in residues
-                ],
-                'triads': residues[0].get('triads', []),
-                'metal_centers': residues[0].get('metal_centers', []),
-                'bimetallic_centers': residues[0].get('bimetallic_centers', [])
-            }
+            try:
+                # 校验必需字段
+                if not residues:
+                    logger.warning(f"Skipping {pdb_id}: no residues")
+                    continue
 
-            output_file = output_dir / f"{pdb_id}_template.json"
-            with open(output_file, 'w') as f:
-                json.dump(template, f, indent=2)
+                first_residue = residues[0]
+                required_fields = ['ec1_prediction', 'chain', 'resseq', 'resname', 'site_prob']
+                missing_fields = [f for f in required_fields if f not in first_residue]
+                if missing_fields:
+                    logger.warning(f"Skipping {pdb_id}: missing fields {missing_fields}")
+                    continue
 
-        logger.info(f"已导出 {len(by_pdb)} 个纳米酶模板到 {output_dir}")
+                # 构建约束文件
+                template = {
+                    'source_pdb': pdb_id,
+                    'ec_class': first_residue['ec1_prediction'],
+                    'catalytic_residues': [
+                        {
+                            'chain': r['chain'],
+                            'resseq': r['resseq'],
+                            'resname': r['resname'],
+                            'site_prob': r['site_prob']
+                        }
+                        for r in residues
+                    ],
+                    'triads': first_residue.get('triads', []),
+                    'metal_centers': first_residue.get('metal_centers', []),
+                    'bimetallic_centers': first_residue.get('bimetallic_centers', [])
+                }
+
+                output_file = output_dir_path / f"{pdb_id}_template.json"
+                with open(output_file, 'w') as f:
+                    json.dump(template, f, indent=2)
+
+                exported_count += 1
+                logger.debug(f"Exported template for {pdb_id}")
+
+            except Exception as e:
+                logger.error(f"Failed to export template for {pdb_id}: {e}")
+
+        logger.info(f"已导出 {exported_count} 个纳米酶模板到 {output_dir_path}")
+
+        # 如果有失败的任务，导出失败列表
+        if self.failed_tasks:
+            failed_file = output_dir_path / "failed_tasks.json"
+            with open(failed_file, 'w') as f:
+                json.dump(self.failed_tasks, f, indent=2)
+            logger.info(f"已导出 {len(self.failed_tasks)} 个失败任务到 {failed_file}")
 
     def get_statistics(self, results: List[Dict]) -> Dict:
         """获取筛选统计信息"""

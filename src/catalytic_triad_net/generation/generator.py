@@ -117,14 +117,13 @@ class CatalyticNanozymeGenerator:
         for step in range(n_steps):
             optimizer.zero_grad()
             
-            # 计算约束损失
-            loss = 0.0
+            # 计算约束损失（保持张量类型，避免布尔歧义）
+            loss = torch.zeros(1, device=coords.device, dtype=coords.dtype)
             for i in range(coords.shape[0]):
                 loss += self.constraint_loss(coords[i], constraints)
             
-            if loss > 0:
-                loss.backward()
-                optimizer.step()
+            loss.backward()
+            optimizer.step()
             
             if step % 20 == 0:
                 logger.debug(f"Refine step {step}, loss: {loss.item():.4f}")
@@ -224,4 +223,3 @@ class CatalyticNanozymeGenerator:
 # =============================================================================
 # 7. 训练接口
 # =============================================================================
-
