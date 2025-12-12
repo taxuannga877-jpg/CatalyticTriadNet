@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
 神经网络模型模块
+
+Refactored to use:
+- ModelConstants for architecture parameters
+- Better variable naming for clarity
+- Extracted methods for complex operations
 """
 
 import math
@@ -11,6 +16,7 @@ from typing import Dict, Tuple, Optional
 import logging
 
 from ..config import get_config
+from ..core.constants import ModelConstants
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +59,14 @@ class GeometricMessagePassing(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(hidden_dim)
 
+        # FFN with expansion factor from ModelConstants
+        ffn_dim = hidden_dim * ModelConstants.FFN_EXPANSION_FACTOR
         self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4),
-            nn.LayerNorm(hidden_dim * 4),
+            nn.Linear(hidden_dim, ffn_dim),
+            nn.LayerNorm(ffn_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.Linear(ffn_dim, hidden_dim),
             nn.Dropout(dropout)
         )
         self.ffn_norm = nn.LayerNorm(hidden_dim)
