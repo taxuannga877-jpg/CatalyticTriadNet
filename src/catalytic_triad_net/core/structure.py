@@ -5,6 +5,12 @@ PDB structure processing and feature encoding module.
 This module provides functionality for downloading, parsing, and encoding
 protein structures from PDB files, with support for both BioPython and
 simplified parsing methods.
+
+Refactored to use:
+- Custom exception classes for better error handling
+- Type annotations for improved code clarity
+- Constants from the constants module to eliminate magic numbers
+- Smaller, focused functions for better maintainability
 """
 
 import numpy as np
@@ -13,14 +19,21 @@ import time
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import logging
 
 from ..config import get_config
 from .constants import (
     AA_PROPERTIES, CATALYTIC_PRIOR, NON_STANDARD_AA_MAP,
-    BACKBONE_ATOMS, SIDECHAIN_ATOMS_BY_AA
+    BACKBONE_ATOMS, SIDECHAIN_ATOMS_BY_AA,
+    StructureConstants, NetworkConstants
 )
+from .exceptions import (
+    PDBDownloadError, PDBParseError, PDBNotFoundError,
+    DataValidationError
+)
+from .types import ResidueDict, StructureDict, EncodedStructure, PathLike
+from .validators import validate_pdb_id
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +76,7 @@ class PDBProcessor:
     - Missing atom handling
     """
 
-    def __init__(self, pdb_dir: Optional[str] = None, config=None):
+    def __init__(self, pdb_dir: Optional[PathLike] = None, config=None):
         """
         Initialize PDB processor.
 
@@ -80,14 +93,14 @@ class PDBProcessor:
 
         self.pdb_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load configuration parameters
-        self.timeout = self.config.get('data.request_timeout', 30)
-        self.max_retries = self.config.get('data.max_retries', 3)
-        self.retry_delay = self.config.get('data.retry_delay', 1.0)
-        self.rate_limit = self.config.get('data.rate_limit', 0.5)
+        # Load configuration parameters with fallback to constants
+        self.timeout = self.config.get('data.request_timeout', NetworkConstants.DEFAULT_TIMEOUT)
+        self.max_retries = self.config.get('data.max_retries', NetworkConstants.MAX_RETRIES)
+        self.retry_delay = self.config.get('data.retry_delay', NetworkConstants.RETRY_INITIAL_DELAY)
+        self.rate_limit = self.config.get('data.rate_limit', NetworkConstants.RATE_LIMIT_DELAY)
         self.validate_cache = self.config.get('data.validate_cache', True)
 
-        self._last_request_time = 0
+        self._last_request_time = 0.0
 
         # Try to import BioPython
         try:
@@ -99,7 +112,7 @@ class PDBProcessor:
             self.biopython = False
             logger.warning("BioPython not installed, using simplified parser")
 
-    def download_pdb(self, pdb_id: str) -> Optional[Path]:
+    def download_pdb(self, pdb_id: str) -> Path:
         """
         Download PDB file with retry mechanism and cache validation.
 
@@ -107,15 +120,18 @@ class PDBProcessor:
             pdb_id: PDB identifier (e.g., '1ABC')
 
         Returns:
-            Path to downloaded PDB file, or None if download failed
+            Path to downloaded PDB file
 
-        Error codes (logged):
-            - CACHE_VALID: File exists and passes validation
-            - DOWNLOAD_SUCCESS: Successfully downloaded
-            - DOWNLOAD_FAILED: All retry attempts failed
-            - VALIDATION_FAILED: Downloaded file failed validation
+        Raises:
+            PDBNotFoundError: If PDB ID does not exist
+            PDBDownloadError: If download fails after all retries
+            DataValidationError: If downloaded content is invalid
+
+        Note:
+            Uses exponential backoff for retries with factor from NetworkConstants
         """
-        pdb_id = pdb_id.lower()
+        # Validate and normalize PDB ID
+        pdb_id = validate_pdb_id(pdb_id).lower()
         pdb_file = self.pdb_dir / f"{pdb_id}.pdb"
         metadata_file = self.pdb_dir / f"{pdb_id}.meta.json"
 
@@ -130,7 +146,7 @@ class PDBProcessor:
                 return pdb_file
 
         # Download with retry
-        url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
+        url = f"{NetworkConstants.PDB_DOWNLOAD_BASE}/{pdb_id}.pdb"
 
         for attempt in range(self.max_retries):
             try:
@@ -145,59 +161,96 @@ class PDBProcessor:
 
                     # Validate content
                     if not self._validate_pdb_content(content):
-                        logger.error(f"Invalid PDB content for {pdb_id}")
                         if attempt < self.max_retries - 1:
-                            time.sleep(self.retry_delay * (2 ** attempt))
+                            delay = self.retry_delay * (NetworkConstants.RETRY_BACKOFF_FACTOR ** attempt)
+                            time.sleep(delay)
                             continue
-                        return None
+                        raise DataValidationError(
+                            f"Invalid PDB content for {pdb_id}",
+                            details={"pdb_id": pdb_id, "content_length": len(content)}
+                        )
 
-                    # Write file atomically with lock
-                    temp_file = pdb_file.with_suffix('.tmp')
-                    try:
-                        with open(temp_file, 'w') as f:
-                            f.write(content)
-
-                        # Create metadata
-                        metadata = {
-                            'pdb_id': pdb_id,
-                            'download_time': time.time(),
-                            'size': len(content),
-                            'checksum': hashlib.md5(content.encode()).hexdigest()
-                        }
-                        with open(metadata_file, 'w') as f:
-                            json.dump(metadata, f)
-
-                        # Atomic rename
-                        temp_file.rename(pdb_file)
-                        logger.info(f"Successfully downloaded PDB {pdb_id}")
-                        return pdb_file
-
-                    except Exception as e:
-                        logger.error(f"Failed to write PDB file {pdb_id}: {e}")
-                        temp_file.unlink(missing_ok=True)
-                        raise
+                    # Write file atomically
+                    self._write_pdb_file_atomic(pdb_file, metadata_file, pdb_id, content)
+                    logger.info(f"Successfully downloaded PDB {pdb_id}")
+                    return pdb_file
 
                 elif response.status_code == 404:
-                    logger.error(f"PDB {pdb_id} not found (404)")
-                    return None
+                    raise PDBNotFoundError(
+                        f"PDB {pdb_id} not found",
+                        details={"pdb_id": pdb_id, "url": url}
+                    )
                 else:
                     logger.warning(f"Download failed with status {response.status_code}")
 
+            except (PDBNotFoundError, DataValidationError):
+                # Don't retry for these errors
+                raise
             except requests.Timeout:
                 logger.warning(f"Timeout downloading PDB {pdb_id}")
             except requests.RequestException as e:
                 logger.warning(f"Request error downloading PDB {pdb_id}: {e}")
             except Exception as e:
                 logger.error(f"Unexpected error downloading PDB {pdb_id}: {e}")
+                raise PDBDownloadError(
+                    f"Unexpected error downloading PDB {pdb_id}",
+                    details={"pdb_id": pdb_id, "error": str(e)}
+                )
 
             # Exponential backoff
             if attempt < self.max_retries - 1:
-                delay = self.retry_delay * (2 ** attempt)
+                delay = self.retry_delay * (NetworkConstants.RETRY_BACKOFF_FACTOR ** attempt)
                 logger.info(f"Retrying in {delay:.1f} seconds...")
                 time.sleep(delay)
 
-        logger.error(f"Failed to download PDB {pdb_id} after {self.max_retries} attempts")
-        return None
+        raise PDBDownloadError(
+            f"Failed to download PDB {pdb_id} after {self.max_retries} attempts",
+            details={"pdb_id": pdb_id, "max_retries": self.max_retries}
+        )
+
+    def _write_pdb_file_atomic(
+        self,
+        pdb_file: Path,
+        metadata_file: Path,
+        pdb_id: str,
+        content: str
+    ) -> None:
+        """
+        Write PDB file atomically with metadata.
+
+        Args:
+            pdb_file: Target PDB file path
+            metadata_file: Metadata file path
+            pdb_id: PDB identifier
+            content: PDB file content
+
+        Raises:
+            PDBDownloadError: If file write fails
+        """
+        temp_file = pdb_file.with_suffix('.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                f.write(content)
+
+            # Create metadata
+            metadata = {
+                'pdb_id': pdb_id,
+                'download_time': time.time(),
+                'size': len(content),
+                'checksum': hashlib.md5(content.encode()).hexdigest()
+            }
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f)
+
+            # Atomic rename
+            temp_file.rename(pdb_file)
+
+        except Exception as e:
+            temp_file.unlink(missing_ok=True)
+            raise PDBDownloadError(
+                f"Failed to write PDB file {pdb_id}",
+                details={"pdb_id": pdb_id, "error": str(e)}
+            )
 
     def _apply_rate_limit(self):
         """Apply rate limiting between requests."""
