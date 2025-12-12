@@ -316,7 +316,7 @@ class PDBProcessor:
 
         return has_atom
 
-    def parse_pdb(self, pdb_path: Path) -> Dict:
+    def parse_pdb(self, pdb_path: PathLike) -> StructureDict:
         """
         Parse PDB file with error handling and validation.
 
@@ -327,10 +327,17 @@ class PDBProcessor:
             Dictionary containing parsed structure data
 
         Raises:
-            ValueError: If PDB file is invalid or empty
+            PDBNotFoundError: If PDB file does not exist
+            PDBParseError: If parsing fails
+            DataValidationError: If parsed structure is invalid
         """
+        pdb_path = Path(pdb_path)
+
         if not pdb_path.exists():
-            raise ValueError(f"PDB file not found: {pdb_path}")
+            raise PDBNotFoundError(
+                f"PDB file not found: {pdb_path}",
+                details={"path": str(pdb_path)}
+            )
 
         try:
             if self.biopython:
@@ -340,18 +347,32 @@ class PDBProcessor:
 
             # Validate result
             if result['num_residues'] == 0:
-                raise ValueError(f"No valid residues found in {pdb_path}")
+                raise DataValidationError(
+                    f"No valid residues found in {pdb_path}",
+                    details={"path": str(pdb_path)}
+                )
 
-            # Add shape assertions
-            assert len(result['residues']) == result['num_residues']
-            assert len(result['sequence']) == result['num_residues']
+            # Validate consistency
+            if len(result['residues']) != result['num_residues']:
+                raise DataValidationError(
+                    f"Residue count mismatch in {pdb_path}",
+                    details={
+                        "expected": result['num_residues'],
+                        "actual": len(result['residues'])
+                    }
+                )
 
             logger.info(f"Parsed {pdb_path.name}: {result['num_residues']} residues")
             return result
 
+        except (PDBNotFoundError, PDBParseError, DataValidationError):
+            raise
         except Exception as e:
             logger.error(f"Failed to parse PDB {pdb_path}: {e}")
-            raise
+            raise PDBParseError(
+                f"Unexpected error parsing PDB {pdb_path}",
+                details={"path": str(pdb_path), "error": str(e)}
+            )
 
     def _parse_biopython(self, pdb_path: Path) -> Dict:
         """
