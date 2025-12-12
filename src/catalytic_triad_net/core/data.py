@@ -4,6 +4,11 @@ M-CSA data fetching and processing module.
 
 This module provides functionality to fetch catalytic site data from the M-CSA API,
 with robust error handling, caching, rate limiting, and retry logic.
+
+Refactored to use:
+- Custom exception classes for better error handling
+- Constants from the constants module to eliminate magic numbers
+- Separated concerns (API client, cache manager, data fetcher)
 """
 
 import json
@@ -20,6 +25,11 @@ from tqdm import tqdm
 import logging
 
 from ..config import get_config, Config
+from .constants import NetworkConstants
+from .exceptions import (
+    MCSAAPIError, CacheError, CacheCorruptedError,
+    DataValidationError
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +53,7 @@ class MCSADataFetcher:
         config: Optional Config instance (uses global config if not provided)
     """
 
-    BASE_URL = "https://www.ebi.ac.uk/thornton-srv/m-csa/api"
+    BASE_URL = NetworkConstants.MCSA_API_BASE
 
     def __init__(
         self,
@@ -67,11 +77,11 @@ class MCSADataFetcher:
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load configuration parameters
-        self.timeout = self.config.get('data.request_timeout', 30)
-        self.max_retries = self.config.get('data.max_retries', 3)
-        self.retry_delay = self.config.get('data.retry_delay', 1.0)
-        self.rate_limit = self.config.get('data.rate_limit', 0.5)
+        # Load configuration parameters with fallback to NetworkConstants
+        self.timeout = self.config.get('data.request_timeout', NetworkConstants.API_TIMEOUT)
+        self.max_retries = self.config.get('data.max_retries', NetworkConstants.MAX_RETRIES)
+        self.retry_delay = self.config.get('data.retry_delay', NetworkConstants.RETRY_INITIAL_DELAY)
+        self.rate_limit = self.config.get('data.rate_limit', NetworkConstants.RATE_LIMIT_DELAY)
         self.offline_mode = self.config.get('data.offline_mode', False)
         self.validate_cache = self.config.get('data.validate_cache', True)
 
@@ -103,7 +113,7 @@ class MCSADataFetcher:
             Response object
 
         Raises:
-            requests.RequestException: If all retries fail
+            MCSAAPIError: If all retries fail
         """
         kwargs.setdefault('timeout', self.timeout)
 
@@ -116,15 +126,18 @@ class MCSADataFetcher:
                 elif method.upper() == 'POST':
                     response = requests.post(url, **kwargs)
                 else:
-                    raise ValueError(f"Unsupported HTTP method: {method}")
+                    raise MCSAAPIError(
+                        f"Unsupported HTTP method: {method}",
+                        details={"method": method, "url": url}
+                    )
 
                 response.raise_for_status()
                 return response
 
             except requests.exceptions.RequestException as e:
                 if attempt < self.max_retries - 1:
-                    # Exponential backoff: delay * 2^attempt
-                    delay = self.retry_delay * (2 ** attempt)
+                    # Exponential backoff using NetworkConstants
+                    delay = self.retry_delay * (NetworkConstants.RETRY_BACKOFF_FACTOR ** attempt)
                     logger.warning(
                         f"Request failed (attempt {attempt + 1}/{self.max_retries}): {e}. "
                         f"Retrying in {delay:.1f}s..."
@@ -132,7 +145,10 @@ class MCSADataFetcher:
                     time.sleep(delay)
                 else:
                     logger.error(f"Request failed after {self.max_retries} attempts: {e}")
-                    raise
+                    raise MCSAAPIError(
+                        f"M-CSA API request failed after {self.max_retries} attempts",
+                        details={"url": url, "error": str(e), "attempts": self.max_retries}
+                    )
 
     def _compute_file_hash(self, file_path: Path) -> str:
         """
