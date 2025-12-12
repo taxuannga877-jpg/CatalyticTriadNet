@@ -399,18 +399,15 @@ class PDBProcessor:
 
                     res_name = residue.get_resname()
 
-                    # Map non-standard residues
-                    if res_name in NON_STANDARD_AA_MAP:
-                        mapped_name = NON_STANDARD_AA_MAP[res_name]
-                        logger.debug(f"Mapping non-standard residue {res_name} -> {mapped_name}")
-                        res_name_3letter = mapped_name
-                        # Convert 1-letter to 3-letter
-                        res_name_3letter_full = [k for k, v in AA_3TO1.items() if v == mapped_name][0]
-                        res_name = res_name_3letter_full
-                    elif res_name not in AA_3TO1:
-                        skipped_residues.append((chain.get_id(), resseq, res_name))
+                    # Map non-standard residues (extracted method)
+                    res_name, should_skip = self._map_nonstandard_residue(
+                        res_name, chain.get_id(), resseq
+                    )
+                    if should_skip:
+                        skipped_residues.append((chain.get_id(), resseq, residue.get_resname()))
                         continue
 
+                    # Extract atom coordinates
                     atoms = {}
                     ca_coord = cb_coord = n_coord = c_coord = None
 
@@ -426,16 +423,12 @@ class PDBProcessor:
                         elif atom.get_name() == 'C':
                             c_coord = coord
 
-                    # Check for missing backbone atoms
+                    # Validate and fix coordinates (extracted method)
                     if not ca_coord:
                         logger.warning(f"Missing CA atom for {chain.get_id()}:{resseq}:{res_name}")
                         continue
 
-                    # Handle missing CB (use CA as fallback)
-                    if not cb_coord:
-                        if res_name != 'GLY':  # Glycine doesn't have CB
-                            logger.debug(f"Missing CB atom for {chain.get_id()}:{resseq}:{res_name}, using CA")
-                        cb_coord = ca_coord
+                    cb_coord = self._fix_missing_cb_coord(cb_coord, ca_coord, res_name)
 
                     residues.append({
                         'name': res_name,
@@ -449,9 +442,7 @@ class PDBProcessor:
                     })
                     sequence.append(AA_3TO1[res_name])
 
-        if skipped_residues:
-            logger.info(f"Skipped {len(skipped_residues)} non-standard residues: "
-                       f"{set(r[2] for r in skipped_residues)}")
+        self._log_skipped_residues(skipped_residues)
 
         return {
             'pdb_id': pdb_path.stem,
@@ -459,6 +450,65 @@ class PDBProcessor:
             'sequence': ''.join(sequence),
             'num_residues': len(residues)
         }
+
+    def _map_nonstandard_residue(
+        self,
+        res_name: str,
+        chain_id: str,
+        res_num: int
+    ) -> Tuple[str, bool]:
+        """
+        Map non-standard residue to standard amino acid.
+
+        Args:
+            res_name: Residue name (3-letter code)
+            chain_id: Chain identifier
+            res_num: Residue number
+
+        Returns:
+            Tuple of (mapped_name, should_skip)
+        """
+        if res_name in NON_STANDARD_AA_MAP:
+            mapped_1letter = NON_STANDARD_AA_MAP[res_name]
+            logger.debug(f"Mapping non-standard residue {res_name} -> {mapped_1letter}")
+            # Convert 1-letter to 3-letter
+            mapped_3letter = [k for k, v in AA_3TO1.items() if v == mapped_1letter][0]
+            return mapped_3letter, False
+        elif res_name not in AA_3TO1:
+            return res_name, True
+        else:
+            return res_name, False
+
+    def _fix_missing_cb_coord(
+        self,
+        cb_coord: Optional[List[float]],
+        ca_coord: List[float],
+        res_name: str
+    ) -> List[float]:
+        """
+        Fix missing CB coordinate by using CA as fallback.
+
+        Args:
+            cb_coord: CB coordinate (may be None)
+            ca_coord: CA coordinate
+            res_name: Residue name
+
+        Returns:
+            CB coordinate (or CA if missing)
+        """
+        if cb_coord is None:
+            if res_name != 'GLY':  # Glycine doesn't have CB
+                logger.debug(f"Missing CB atom for {res_name}, using CA")
+            return ca_coord
+        return cb_coord
+
+    def _log_skipped_residues(self, skipped_residues: List[Tuple]) -> None:
+        """Log skipped non-standard residues."""
+        if skipped_residues:
+            unique_types = set(r[2] for r in skipped_residues)
+            logger.info(
+                f"Skipped {len(skipped_residues)} non-standard residues: {unique_types}"
+            )
 
     def _parse_simple(self, pdb_path: Path) -> Dict:
         """
@@ -494,13 +544,9 @@ class PDBProcessor:
                     logger.warning(f"Invalid coordinates in {pdb_path.name} at line: {line[:30]}")
                     continue
 
-                # Map non-standard residues
-                if res_name in NON_STANDARD_AA_MAP:
-                    mapped_name = NON_STANDARD_AA_MAP[res_name]
-                    logger.debug(f"Mapping non-standard residue {res_name} -> {mapped_name}")
-                    # Convert 1-letter to 3-letter
-                    res_name = [k for k, v in AA_3TO1.items() if v == mapped_name][0]
-                elif res_name not in AA_3TO1:
+                # Map non-standard residues (using extracted method)
+                res_name, should_skip = self._map_nonstandard_residue(res_name, chain, res_num)
+                if should_skip:
                     if res_name not in [r[2] for r in skipped_residues]:
                         skipped_residues.append((chain, res_num, res_name))
                     continue
@@ -530,16 +576,11 @@ class PDBProcessor:
             residues.append(current)
             sequence.append(AA_3TO1[current['name']])
 
-        # Fill missing CB coordinates
+        # Fill missing CB coordinates (using extracted method)
         for r in residues:
-            if not r['cb_coord']:
-                if r['name'] != 'GLY':
-                    logger.debug(f"Missing CB for {r['chain']}:{r['number']}:{r['name']}, using CA")
-                r['cb_coord'] = r['ca_coord']
+            r['cb_coord'] = self._fix_missing_cb_coord(r['cb_coord'], r['ca_coord'], r['name'])
 
-        if skipped_residues:
-            logger.info(f"Skipped {len(skipped_residues)} non-standard residues: "
-                       f"{set(r[2] for r in skipped_residues)}")
+        self._log_skipped_residues(skipped_residues)
 
         return {
             'pdb_id': pdb_path.stem,
@@ -741,7 +782,7 @@ class FeatureEncoder:
         Compute spatial environment features for each residue.
 
         Features include:
-        - Local density at 8Å and 12Å
+        - Local density at 8Å and 12Å (using StructureConstants)
         - Average neighbor distance
         - Burial depth (distance to centroid)
         - Local curvature estimate
@@ -760,13 +801,13 @@ class FeatureEncoder:
         centroid = coords.mean(axis=0)
 
         for i in range(n):
-            # Local density (8Å, 12Å)
-            features[i, 0] = np.sum(dist_matrix[i] < 8.0) / n
-            features[i, 1] = np.sum(dist_matrix[i] < 12.0) / n
+            # Local density (using StructureConstants)
+            features[i, 0] = np.sum(dist_matrix[i] < StructureConstants.LOCAL_DENSITY_RADIUS_1) / n
+            features[i, 1] = np.sum(dist_matrix[i] < StructureConstants.LOCAL_DENSITY_RADIUS_2) / n
 
             # Average neighbor distance
             sorted_dists = np.sort(dist_matrix[i])
-            features[i, 2] = np.mean(sorted_dists[1:min(11, n)]) / 20.0 if n > 1 else 0
+            features[i, 2] = np.mean(sorted_dists[1:min(11, n)]) / StructureConstants.LOCAL_DENSITY_RADIUS_3 if n > 1 else 0
 
             # Burial depth (distance to centroid)
             depth = np.linalg.norm(coords[i] - centroid)
